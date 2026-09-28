@@ -28,7 +28,7 @@ from app.services.ai.chunking import TokenAwareChunker, heuristic_token_count
 from app.services.ai.extraction import legal_extractor
 from app.services.ai.processor import DocumentProcessor
 from app.services.ai.structure import detect_sections, match_heading, page_fallback_sections
-from app.services.ai.summarization.base import SummarizationProvider
+from app.services.ai.summarization.base import CHUNK_INSTRUCTION, SummarizationProvider
 from app.services.ai.summarization.registry import build_provider, get_provider, reset_providers
 from app.services.ai.summarization.service import SummarizationService, extractive_summary
 from app.services.ai.text_cleaning import (
@@ -74,11 +74,20 @@ class FakeSummarizer(SummarizationProvider):
         return self._available
 
     def summarize(self, text, max_output_tokens=None, instruction=None) -> str:
+        """
+        Stand in for a working summariser: shorter than the input and built from
+        the input's own words, so it passes the grounding and fidelity gates the
+        way real output must.
+        """
         self.calls.append(text)
         if not self._available:
             return ""
-        first = text.strip().split("\n")[0][:80]
-        return f"SUMMARY[{first}]"
+        words = text.split()
+        kept = words[: max(6, len(words) // 3)]
+        summary = " ".join(kept).strip()
+        if summary and summary[-1] not in ".!?":
+            summary += "."
+        return summary
 
     def summarize_batch(self, texts, max_output_tokens=None, instruction=None):
         self.batch_sizes.append(len(texts))
@@ -558,6 +567,342 @@ def test_async_api(pdf_bytes: bytes) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 8. Output fidelity guards (regressions)
+# ═══════════════════════════════════════════════════════════════════════════
+def test_output_guards() -> None:
+    """
+    Guards on what a model is allowed to return.
+
+    Each check here is a bug that shipped: the echo guard rejected every
+    legitimate summary, generated text was presented truncated mid-sentence, and
+    invented figures were passed through into a legal summary.
+    """
+    print("\n── 8. Output fidelity guards ─────────────────────────────")
+
+    from app.services.ai.summarization.local_provider import (
+        LocalTransformerSummarizer,
+        trim_to_sentence,
+    )
+    from app.services.ai.summarization.service import find_invented_values
+
+    strip = LocalTransformerSummarizer._strip_echoed_input
+    source = (
+        "Either party may terminate this Agreement for convenience upon thirty (30) "
+        "calendar days prior written notice to the other party."
+    )
+
+    # The critical regression: an earlier length-based guard dropped any summary
+    # that was not shorter in characters than its input, which silently discarded
+    # almost every real summary and made the whole feature fall back to extracts.
+    good = "Either side may end the agreement with 30 days written notice."
+    check("a legitimate shorter summary is kept", strip(good, source) == good)
+    longer = (
+        "The agreement allows either contracting party to terminate for "
+        "convenience, provided they give the other party thirty calendar days of "
+        "advance written notice before the termination takes effect."
+    )
+    check("a slightly longer paraphrase is kept, not dropped",
+          strip(longer, source) == longer, f"len {len(longer)} vs source {len(source)}")
+
+    check("a verbatim echo of the input is dropped", strip(source, source) == "")
+    check("an echo with different whitespace is still dropped",
+          strip(source.replace(" ", "  "), source) == "")
+    check("output opening with the input verbatim is dropped",
+          strip(source + " Additionally the parties agree to arbitrate.", source) == "")
+    check("a leading copy of the instruction is stripped or dropped",
+          strip(CHUNK_INSTRUCTION + " " + good, source) in {good, ""})
+    check("empty output stays empty", strip("", source) == "")
+    check("a wildly expanded 'summary' is rejected",
+          strip(good * 8, source) == "")
+
+    # Truncation must never be presented as a finished sentence.
+    check("cuts back to the last complete sentence",
+          trim_to_sentence(
+              "Fees are payable within thirty (30) days of receipt. Past due "
+              "balances shall accrue interest at one and"
+          ).endswith("of receipt."))
+    check("leaves an already-complete sentence untouched",
+          trim_to_sentence("Fees are due within 30 days.") == "Fees are due within 30 days.")
+    check("marks a fragment it cannot cut back",
+          trim_to_sentence("accrue interest at one and").endswith("..."))
+    check("handles empty generated text", trim_to_sentence("") == "")
+
+    # Numeric fidelity: a figure the contract does not contain must not survive.
+    contract = (
+        "Client shall pay a monthly retainer of Ten Thousand Dollars ($10,000 USD), "
+        "a total of $240,000 USD, payable within thirty (30) days, with interest at "
+        "1.5% per month on past due balances."
+    )
+    check("a faithful summary reports no invented values",
+          find_invented_values(
+              "Client pays $10,000 monthly, $240,000 in total, due within 30 days at 1.5%.",
+              contract,
+          ) == [])
+    invented = find_invented_values(
+        "Client pays $99,999 within 45 days with interest at 7%.", contract
+    )
+    check("an invented amount is detected", any("99,999" in v for v in invented), str(invented))
+    check("an invented period is detected", any("45" in v for v in invented), str(invented))
+    check("an invented percentage is detected", any("7%" in v for v in invented), str(invented))
+    check("comma and spacing differences do not count as invented",
+          find_invented_values("Total is $240000 USD.", contract) == [])
+    check("a summary with no figures is never flagged",
+          find_invented_values("The client pays the provider a monthly fee.", contract) == [])
+
+    # Mis-pairing: every value exists in the source, but attached to the wrong
+    # words. A value-level check passes while the term has been altered.
+    from app.services.ai.summarization.service import find_mispaired_values
+
+    paired_source = (
+        "Client shall pay Provider a monthly retainer of Ten Thousand Dollars "
+        "($10,000 USD), for a total estimated contract value of Two Hundred Forty "
+        "Thousand Dollars ($240,000 USD) over the initial term."
+    )
+    swapped = "Client will pay Provider a monthly retainer of Ten Thousand Dollars ($240,000 USD)"
+    check("a figure attached to the wrong words is detected",
+          bool(find_mispaired_values(swapped, paired_source)),
+          str(find_mispaired_values(swapped, paired_source)))
+    check("the value-level check alone cannot see a mis-pairing",
+          find_invented_values(swapped, paired_source) == [],
+          "both figures exist in the source")
+    faithful_pair = "Client will pay a monthly retainer of Ten Thousand Dollars ($10,000 USD)"
+    check("a correctly paired figure is accepted",
+          find_mispaired_values(faithful_pair, paired_source) == [])
+    check("text with no worded amounts is never flagged",
+          find_mispaired_values("Payment is due within thirty (30) days.", paired_source) == [])
+
+    class MispairingSummarizer(FakeSummarizer):
+        def summarize(self, text, max_output_tokens=None, instruction=None):
+            return "Provider is paid a monthly retainer of Ten Thousand Dollars ($240,000 USD) each month."
+
+    mispair_doc = _document_with_chunks(2)
+    for chunk in mispair_doc.chunks:
+        chunk.text = paired_source
+    mispair_result = SummarizationService(
+        provider=MispairingSummarizer()
+    ).summarize_document(mispair_doc)
+    check("a mis-paired summary is replaced by the extract",
+          all("240,000 USD) each month" not in s.summary
+              for s in mispair_result.section_summaries),
+          str([s.summary[:50] for s in mispair_result.section_summaries]))
+
+    # A chunk whose summary invents a figure must fall back to the extract.
+    class InventingSummarizer(FakeSummarizer):
+        def summarize(self, text, max_output_tokens=None, instruction=None):
+            return "The client shall pay $999,999 within 90 days."
+
+    document = _document_with_chunks(3)
+    result = SummarizationService(provider=InventingSummarizer()).summarize_document(document)
+    check("a summary that invents figures is replaced by the extract",
+          all("999,999" not in s.summary for s in result.section_summaries),
+          str([s.summary[:40] for s in result.section_summaries]))
+
+    # Grounding: the guard that catches a checkpoint fine-tuned on the wrong
+    # domain. nsi319/legal-led-base-16384 is trained on SEC litigation releases
+    # and emits fluent text about court judgments for any contract it is given —
+    # fabrication that the numeric checks cannot see, because invented prose
+    # contains no conflicting figures.
+    from app.services.ai.summarization.service import (
+        MIN_GROUNDING_RATIO,
+        grounding_ratio,
+        reject_reason,
+    )
+
+    clause = (
+        "5. Termination 5.1 Either party may terminate this Agreement for "
+        "convenience upon thirty (30) calendar days prior written notice to the "
+        "other party."
+    )
+    fabricated = (
+        "The Securities and Exchange Commission today announced that it has "
+        "entered into a final judgment that permanently enjoins all defendants "
+        "from violating the antifraud provisions."
+    )
+    paraphrase = (
+        "Either contracting party can end the agreement for convenience by giving "
+        "the other party thirty calendar days of prior written notice."
+    )
+    check("fabricated prose scores near zero grounding",
+          grounding_ratio(fabricated, clause) < 0.2,
+          f"{grounding_ratio(fabricated, clause):.0%}")
+    check("a faithful paraphrase scores high grounding",
+          grounding_ratio(paraphrase, clause) >= MIN_GROUNDING_RATIO,
+          f"{grounding_ratio(paraphrase, clause):.0%}")
+    check("a verbatim extract scores full grounding",
+          grounding_ratio(clause, clause) == 1.0)
+    check("an empty summary does not divide by zero",
+          grounding_ratio("", clause) == 1.0)
+
+    # Fabrication that reuses the parties' names is the hard case: it scored 45%
+    # against the real document, which is why the threshold sits at 0.6.
+    preamble = (
+        'This Master Services Agreement is entered into as of October 1, 2026 by '
+        'and between Acme Enterprise Solutions Inc., a Delaware corporation with '
+        'offices at 100 Innovation Way, New York, and Global Logistics Corp., an '
+        'Illinois corporation with offices at 500 Commerce Blvd, Chicago.'
+    )
+    name_reusing_fabrication = (
+        "On October 1, 2026, the United States District Court for the Southern "
+        "District of Illinois entered final consent judgments against Acme "
+        "Enterprise Solutions Inc., a Delaware corporation, and Global Logistics "
+        "Corp., in connection with an alleged insider trading scheme."
+    )
+    check("fabrication that reuses party names is still rejected",
+          reject_reason(name_reusing_fabrication, preamble) is not None,
+          f"grounding {grounding_ratio(name_reusing_fabrication, preamble):.0%}")
+
+    # The unified gate must apply every check, at every level of the hierarchy.
+    check("the gate rejects empty output", reject_reason("", clause) == "empty")
+    check("the gate accepts a faithful paraphrase",
+          reject_reason(paraphrase, clause) is None)
+    check("the gate reports ungrounded output",
+          "not grounded" in (reject_reason(fabricated, clause) or ""))
+    check("the gate reports an invented value",
+          "absent from the source" in (
+              reject_reason(
+                  "Either party may terminate on ninety (90) days notice.", clause
+              ) or ""
+          ))
+
+    # A fabricating model must not be able to reach the executive summary either.
+    # Previously the numeric checks ran only on chunks, so a fabricated executive
+    # summary carrying a wrong date ("October 1, 2020") passed.
+    class FabricatingSummarizer(FakeSummarizer):
+        def summarize(self, text, max_output_tokens=None, instruction=None):
+            return (
+                "On October 1, 2020, the United States District Court entered "
+                "final consent judgments over an alleged insider trading scheme."
+            )
+
+    fabricated_doc = _document_with_chunks(10)
+    fabricated_result = SummarizationService(
+        provider=FabricatingSummarizer()
+    ).summarize_document(fabricated_doc)
+    check("no fabricated text reaches the section summaries",
+          all("insider trading" not in s.summary for s in fabricated_result.section_summaries))
+    check("no fabricated text reaches the executive summary",
+          "insider trading" not in fabricated_result.executive_summary,
+          fabricated_result.executive_summary[:70])
+    check("a run where nothing could be summarised is reported as degraded",
+          fabricated_result.degraded and bool(fabricated_result.degraded_reason),
+          fabricated_result.degraded_reason[:80])
+
+    # Silent extractive fallback must never look like a successful summary.
+    class SilentFailSummarizer(FakeSummarizer):
+        def summarize(self, text, max_output_tokens=None, instruction=None):
+            return ""
+
+    silent = SummarizationService(
+        provider=SilentFailSummarizer()
+    ).summarize_document(_document_with_chunks(4))
+    check("a model that returns nothing is reported, not passed off as a summary",
+          silent.degraded and "no usable summary" in silent.degraded_reason.lower(),
+          silent.degraded_reason[:80])
+    check("section summaries still exist when the model produced nothing",
+          all(s.summary for s in silent.section_summaries))
+
+    # section_label existed on Chunk but not on SectionSummary, so a hasattr
+    # branch in the service silently took the wrong path.
+    from app.domain.summary import SectionSummary
+
+    check("SectionSummary exposes a citation label",
+          SectionSummary(section_number="5.4", section_title="Termination").section_label
+          == "5.4 Termination")
+    check("the label falls back to whichever part exists",
+          SectionSummary(section_title="Preamble").section_label == "Preamble")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 9. Model loading resilience
+# ═══════════════════════════════════════════════════════════════════════════
+def test_load_resilience() -> None:
+    """
+    A missing or stalled checkpoint must degrade, never hang.
+
+    An unbounded load left every upload stuck on "summarizing" with no diagnosis,
+    because a first run downloads hundreds of megabytes and a rate-limited hub
+    connection simply never returns.
+    """
+    print("\n── 9. Model loading resilience ───────────────────────────")
+
+    from app.services.ai.summarization.local_provider import LocalTransformerSummarizer
+
+    provider = LocalTransformerSummarizer(model_name="definitely/not-a-real-model")
+    candidates = provider._candidate_models()
+    check("the configured model is tried first",
+          candidates[0] == "definitely/not-a-real-model")
+    check("configured fallbacks follow it", len(candidates) > 1, str(candidates))
+    check("no duplicate candidates", len(candidates) == len(set(candidates)))
+
+    # A load that never returns must be abandoned at the deadline.
+    import time as _time
+
+    slow = LocalTransformerSummarizer(model_name="slow/model")
+    slow._load_now = lambda name: _time.sleep(30) or True
+    original_timeout = settings.SUMMARIZATION_LOAD_TIMEOUT
+    settings.SUMMARIZATION_LOAD_TIMEOUT = 1
+    try:
+        started = _time.time()
+        reason = slow._try_load("slow/model")
+        elapsed = _time.time() - started
+        check("a stalled load is abandoned at the deadline",
+              reason is not None and elapsed < 10, f"{elapsed:.1f}s, reason={reason}")
+        check("the timeout reason is explicit",
+              bool(reason) and "exceeded" in reason, str(reason))
+    finally:
+        settings.SUMMARIZATION_LOAD_TIMEOUT = original_timeout
+
+    broken = LocalTransformerSummarizer(model_name="bad/model")
+    broken._load_now = lambda name: (_ for _ in ()).throw(OSError("no such checkpoint"))
+    reason = broken._try_load("bad/model")
+    check("a load error is reported as a reason, not raised",
+          reason is not None and "OSError" in reason, str(reason))
+
+    # T5 needs its task prefix; LED and BART do not.
+    t5 = LocalTransformerSummarizer(model_name="some/t5-summariser")
+    check("a T5 checkpoint is detected as needing a task prefix",
+          t5._needs_task_prefix())
+    led = LocalTransformerSummarizer(model_name="allenai/led-base-16384")
+    check("an LED checkpoint needs no task prefix", not led._needs_task_prefix())
+    check("an LED checkpoint is recognised for global attention", led._is_led())
+
+    # LED reports attention_window as a list with one entry per layer. An int()
+    # conversion placed before the list check raised on every LED generation,
+    # silently turning the whole feature into verbatim extraction.
+    class _Cfg:
+        attention_window = [1024] * 6
+
+    class _FakeModel:
+        config = _Cfg()
+
+    class _FakeTok:
+        pad_token_id = 0
+
+    import torch
+
+    padder = LocalTransformerSummarizer(model_name="allenai/led-base-16384")
+    padder._model = _FakeModel()
+    padder._tokenizer = _FakeTok()
+    padder._torch = torch
+    encoded = {
+        "input_ids": torch.ones((1, 181), dtype=torch.long),
+        "attention_mask": torch.ones((1, 181), dtype=torch.long),
+    }
+    padded = padder._pad_to_attention_window(encoded)
+    check("a list-valued attention_window does not raise",
+          int(padded["input_ids"].shape[-1]) == 1024,
+          f"padded to {int(padded['input_ids'].shape[-1])}")
+    check("the attention mask is padded to the same length",
+          int(padded["attention_mask"].shape[-1]) == int(padded["input_ids"].shape[-1]))
+    already = {
+        "input_ids": torch.ones((1, 1024), dtype=torch.long),
+        "attention_mask": torch.ones((1, 1024), dtype=torch.long),
+    }
+    check("an already-aligned batch is left untouched",
+          int(padder._pad_to_attention_window(already)["input_ids"].shape[-1]) == 1024)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 def main_() -> int:
     print("=" * 74)
     print("Canonical pipeline + summarisation architecture tests")
@@ -575,6 +920,8 @@ def main_() -> int:
         test_providers()
         test_hierarchical_summarization()
         test_async_api(pdf_bytes)
+        test_output_guards()
+        test_load_resilience()
 
     print("\n" + "=" * 74)
     print(f"{len(PASSED)} passed, {len(FAILED)} failed")

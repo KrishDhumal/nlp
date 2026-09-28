@@ -18,6 +18,8 @@ statement can be traced to its pages. Page numbers are never generated.
 
 from __future__ import annotations
 
+import os
+import re
 import time
 from typing import Callable, Dict, List, Optional
 
@@ -25,6 +27,7 @@ from app.core.config import settings
 from app.core.logging import logger
 from app.domain.document import CanonicalDocument, Chunk
 from app.services.ai.extraction import legal_extractor
+from app.services.ai.text_cleaning import extract_preserved_values
 from app.domain.summary import (
     SectionSummary,
     SourceReference,
@@ -50,6 +53,9 @@ class SummarizationService:
 
     def __init__(self, provider: Optional[SummarizationProvider] = None):
         self._provider = provider
+        # How many chunks the model summarised on the last run, as opposed to
+        # falling back to an extract.
+        self._model_summary_count = 0
 
     @property
     def provider(self) -> SummarizationProvider:
@@ -77,8 +83,6 @@ class SummarizationService:
         result = SummaryResult(
             document_id=document.document_id,
             provider=provider.name,
-            model_name=provider.model_name,
-            model_version=provider.model_version,
             pipeline_version=settings.PIPELINE_VERSION,
             prompt_version=settings.PROMPT_VERSION,
         )
@@ -104,6 +108,11 @@ class SummarizationService:
         )
 
         model_ready = provider.is_available()
+        # Read the model identity only after the load: the provider may have
+        # fallen through to a different checkpoint, and a stored result must name
+        # the engine that actually produced it.
+        result.model_name = provider.model_name
+        result.model_version = provider.model_version
         if not model_ready:
             logger.warning(
                 f"[Summarization] provider '{provider.name}' unavailable — "
@@ -118,7 +127,26 @@ class SummarizationService:
         # ── Map: one summary per chunk ───────────────────────────────────
         if on_progress:
             on_progress(60, "Summarizing sections...")
+        self._model_summary_count = 0
         chunk_summaries = self._summarize_chunks(chunks, provider, model_ready)
+
+        if model_ready and self._model_summary_count == 0:
+            result.degraded = True
+            result.degraded_reason = (
+                f"The {provider.name} model ({provider.model_name}) loaded but "
+                "produced no usable summary for any section, so the text below is "
+                "extracted verbatim from the document rather than summarised. "
+                "Check the server log for generation errors."
+            )
+            logger.error(f"[Summarization] {result.degraded_reason}")
+        elif model_ready and self._model_summary_count < len(chunks) / 2:
+            result.degraded = True
+            result.degraded_reason = (
+                f"Only {self._model_summary_count} of {len(chunks)} sections could "
+                "be summarised by the model; the rest are extracted verbatim from "
+                "the document."
+            )
+            logger.warning(f"[Summarization] {result.degraded_reason}")
 
         # ── Reduce: chunk summaries → section summaries ──────────────────
         if on_progress:
@@ -169,7 +197,15 @@ class SummarizationService:
         provider: SummarizationProvider,
         model_ready: bool,
     ) -> Dict[str, str]:
-        """Summarise each chunk, keyed by chunk_id."""
+        """
+        Summarise each chunk, keyed by chunk_id.
+
+        Every model summary is checked for numeric fidelity before it is accepted:
+        a summary that introduces a monetary amount, percentage or period absent
+        from its source has altered the contract's terms, and for a legal document
+        that is worse than a blunter but faithful extract. Such a summary is
+        replaced with the extractive one, which cannot invent anything.
+        """
         if not model_ready:
             return {chunk.chunk_id: extractive_summary(chunk.text) for chunk in chunks}
 
@@ -179,10 +215,40 @@ class SummarizationService:
             max_output_tokens=settings.SUMMARIZATION_MAX_OUTPUT_TOKENS,
             instruction=CHUNK_INSTRUCTION,
         )
-        return {
-            chunk.chunk_id: (summary.strip() or extractive_summary(chunk.text))
-            for chunk, summary in zip(chunks, summaries)
-        }
+
+        accepted: Dict[str, str] = {}
+        invented_count = 0
+        for chunk, summary in zip(chunks, summaries):
+            summary = (summary or "").strip()
+            if not summary:
+                accepted[chunk.chunk_id] = extractive_summary(chunk.text)
+                continue
+            reason = reject_reason(summary, chunk.text)
+            if reason:
+                invented_count += 1
+                logger.warning(
+                    f"[Summarization] {chunk.chunk_id} summary rejected — {reason}; "
+                    "using the extractive summary instead."
+                )
+                accepted[chunk.chunk_id] = extractive_summary(chunk.text)
+            else:
+                accepted[chunk.chunk_id] = summary
+
+        if invented_count:
+            logger.warning(
+                f"[Summarization] {invented_count}/{len(chunks)} chunk summaries "
+                "failed the numeric fidelity check."
+            )
+
+        # Track how many chunks the model actually summarised. A run where the
+        # model produced nothing usable returns verbatim source text, which looks
+        # to a reader exactly like a broken summariser — so it must be reported
+        # rather than passed off as a successful summary.
+        self._model_summary_count = sum(
+            1 for chunk, summary in zip(chunks, summaries)
+            if (summary or "").strip() and accepted[chunk.chunk_id] == summary.strip()
+        )
+        return accepted
 
     # ────────────────────────────────────────────────────────────────────
     # Reduce stages
@@ -222,11 +288,20 @@ class SummarizationService:
                 text = parts[0]
             elif model_ready:
                 combined = "\n\n".join(parts)
-                text = provider.summarize(
+                reduced = provider.summarize(
                     combined,
                     max_output_tokens=settings.SUMMARIZATION_MAX_OUTPUT_TOKENS,
                     instruction=GROUP_INSTRUCTION,
-                ) or " ".join(parts)
+                )
+                reason = reject_reason(reduced, combined)
+                if reason:
+                    logger.warning(
+                        f"[Summarization] section reduce rejected — {reason}; "
+                        "keeping the chunk summaries."
+                    )
+                    text = " ".join(parts)
+                else:
+                    text = reduced
             else:
                 text = " ".join(parts)
 
@@ -234,7 +309,7 @@ class SummarizationService:
                 section_id=section_id,
                 section_number=first.section_number,
                 section_title=first.section_title or "Section",
-                summary=text.strip(),
+                summary=tidy_summary(text, first.section_title, first.section_number),
                 key_points=derive_key_points(text, group),
                 page_start=min(c.page_start for c in group),
                 page_end=max(c.page_end for c in group),
@@ -266,9 +341,9 @@ class SummarizationService:
             return ""
 
         if not model_ready:
-            # Lead with the first two sections, which in a contract carry the
-            # purpose and the parties.
-            return " ".join(texts[:3])[:1200]
+            # Lead with the first sections, which in a contract carry the purpose
+            # and the parties.
+            return clip_to_sentence(" ".join(texts[:3]), 1200)
 
         if len(texts) > settings.SUMMARY_HIERARCHY_THRESHOLD:
             group_size = max(2, settings.SUMMARY_GROUP_SIZE)
@@ -280,7 +355,12 @@ class SummarizationService:
                     max_output_tokens=settings.SUMMARIZATION_MAX_OUTPUT_TOKENS,
                     instruction=GROUP_INSTRUCTION,
                 )
-                grouped.append(summary or block[:600])
+                reason = reject_reason(summary, block)
+                if reason:
+                    logger.warning(f"[Summarization] group reduce rejected — {reason}")
+                    grouped.append(clip_to_sentence(block, 600))
+                else:
+                    grouped.append(summary)
             texts = grouped
             logger.info(
                 f"[Summarization] intermediate reduce: "
@@ -292,7 +372,19 @@ class SummarizationService:
             max_output_tokens=settings.SUMMARIZATION_MAX_OUTPUT_TOKENS * 2,
             instruction=FINAL_INSTRUCTION,
         )
-        return final or " ".join(texts[:3])[:1200]
+        joined = "\n\n".join(texts)
+        final_reason = reject_reason(final, joined)
+        if not final_reason:
+            return final
+        logger.warning(f"[Summarization] executive summary rejected — {final_reason}")
+        # The reduce produced nothing usable (a weak checkpoint often just echoes
+        # its input, which the echo guard rejects). Fall back to the leading
+        # section summaries, cut at a sentence boundary rather than mid-word.
+        logger.info(
+            "[Summarization] composing the executive summary from the section "
+            "summaries instead."
+        )
+        return clip_to_sentence(" ".join(texts[:3]), 1200)
 
     @staticmethod
     def _build_overview(document: CanonicalDocument, result: SummaryResult) -> str:
@@ -346,7 +438,7 @@ class SummarizationService:
             if category in priority:
                 items.append(SummaryItem(
                     type=category,
-                    label=section.section_label if hasattr(section, "section_label") else category,
+                    label=section.section_label or category,
                     summary=section.summary,
                     source_pages=list(range(section.page_start, section.page_end + 1)),
                     section_title=section.section_title,
@@ -357,6 +449,208 @@ class SummarizationService:
 # ─────────────────────────────────────────────────────────────────────────────
 # Extractive fallback — used when no model is available
 # ─────────────────────────────────────────────────────────────────────────────
+# Words that carry no topic signal, excluded when measuring grounding.
+_STOPWORDS = frozenset("""
+a an the and or but if then than that this these those of in on at to for from by
+with without within into over under between among as is are was were be been being
+shall will may must can could would should have has had do does did not no nor so
+such any all each other another its it their his her our your there here which who
+whom whose what when where why how each either neither both per upon
+""".split())
+
+# Minimum share of a summary's content words that must also appear in its source.
+# Calibrated on real output: a faithful paraphrase of a clause scores 75-100%,
+# while fabricated prose that merely reuses the parties' names scores around 45%.
+# 0.6 separates them with margin on both sides.
+MIN_GROUNDING_RATIO = float(os.getenv("SUMMARY_MIN_GROUNDING", "0.6"))
+
+
+def content_words(text: str) -> set:
+    """Lowercased content words of `text`, stopwords and short tokens removed."""
+    import re
+
+    words = re.findall(r"[a-z][a-z'\-]{2,}", (text or "").lower())
+    return {w for w in words if w not in _STOPWORDS}
+
+
+def grounding_ratio(summary: str, source: str) -> float:
+    """
+    Share of the summary's content words that appear in the source.
+
+    1.0 means every meaningful word came from the source; near 0 means the model
+    wrote about something else. This is the guard that catches a checkpoint
+    fine-tuned on the wrong domain — one that emits fluent, plausible text with
+    no relationship to the document it was given. Numeric fidelity checks cannot
+    see that, because fabricated prose contains no conflicting figures.
+    """
+    summary_words = content_words(summary)
+    if not summary_words:
+        return 1.0
+    source_words = content_words(source)
+    if not source_words:
+        return 0.0
+    return len(summary_words & source_words) / len(summary_words)
+
+
+def reject_reason(candidate: str, source: str) -> Optional[str]:
+    """
+    Why `candidate` is not an acceptable summary of `source`, or None if it is.
+
+    Applied at every level of the hierarchy — chunk, group, section and executive.
+    An earlier version checked grounding on the reduce stages but only checked
+    figures on the chunk stage, which let a fabricated executive summary through
+    carrying a date the contract never contained.
+    """
+    text = (candidate or "").strip()
+    if not text:
+        return "empty"
+
+    grounding = grounding_ratio(text, source)
+    if grounding < MIN_GROUNDING_RATIO:
+        return f"not grounded in the source ({grounding:.0%} of content words appear in it)"
+
+    invented = find_invented_values(text, source)
+    if invented:
+        return f"introduces values absent from the source {invented}"
+
+    mispaired = find_mispaired_values(text, source)
+    if mispaired:
+        return f"attaches figures to the wrong terms {mispaired}"
+
+    return None
+
+
+def clip_to_sentence(text: str, limit: int) -> str:
+    """
+    Cut `text` to at most `limit` characters, ending at a sentence boundary.
+
+    A blind character slice ends mid-word, which looks like corrupted output.
+    """
+    import re
+
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    window = cleaned[:limit]
+    cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
+    if cut > limit // 3:
+        return window[:cut + 1].strip()
+    # No sentence boundary to use — cut on a word and mark the truncation.
+    space = window.rfind(" ")
+    return (window[:space] if space > 0 else window).rstrip(" ,;:-") + "..."
+
+
+def tidy_summary(text: str, section_title: str = "", section_number: str = "") -> str:
+    """
+    Make a generated summary presentable.
+
+    Extractive checkpoints tend to repeat the section heading they were given and
+    keep the source's hard line breaks, so a summary arrives as
+    "Confidentiality\n\n4.1 Each party shall...". The heading is already shown
+    beside the summary in the UI, so repeating it wastes the reader's first line.
+    """
+    import re
+
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return ""
+
+    # Drop a leading repeat of the heading, with or without its number.
+    for prefix in filter(None, [
+        f"{section_number} {section_title}".strip(),
+        section_title,
+        section_number,
+    ]):
+        if cleaned.lower().startswith(prefix.lower()):
+            candidate = cleaned[len(prefix):].lstrip(" .:-\u2013\u2014")
+            # Only if something substantial survives.
+            if len(candidate) >= 40:
+                cleaned = candidate
+            break
+    return cleaned
+
+
+# "Ten Thousand Dollars ($10,000 USD)" — contracts state an amount in words and
+# then in figures. A model that keeps the words but swaps the figure produces a
+# sentence where every value exists in the source, so a value-level check passes
+# while the meaning is wrong.
+_WORDED_AMOUNT = re.compile(
+    r"((?:[A-Z][a-z]+|and|[\w-]+)(?:\s+(?:[A-Z][a-z]+|and|[\w-]+)){0,5}?\s*"
+    r"(?:Dollars?|Rupees?|Euros?|Pounds?|percent|per\s?cent))\s*"
+    r"\(?\s*([$₹£€]?\s?[\d,]+(?:\.\d+)?\s?%?)",
+    re.IGNORECASE,
+)
+
+
+def find_mispaired_values(summary: str, source: str) -> List[str]:
+    """
+    Figures that are paired with the wrong words.
+
+    Catches the failure a value-level check cannot see: the summary keeps a
+    spelled-out amount from the contract but attaches a different figure to it
+    ("Ten Thousand Dollars ($240,000 USD)"). Both values exist in the source, so
+    nothing was invented — but the term has been altered, which for a contract is
+    the same kind of error.
+    """
+    def normalise_number(value: str) -> str:
+        return re.sub(r"[^\d.]", "", value or "")
+
+    source_pairs: dict = {}
+    for words, figure in _WORDED_AMOUNT.findall(source):
+        key = re.sub(r"\s+", " ", words).strip().lower()
+        source_pairs.setdefault(key, set()).add(normalise_number(figure))
+
+    mispaired: List[str] = []
+    for words, figure in _WORDED_AMOUNT.findall(summary):
+        key = re.sub(r"\s+", " ", words).strip().lower()
+        expected = source_pairs.get(key)
+        if not expected:
+            continue
+        if normalise_number(figure) not in expected:
+            mispaired.append(f"{words.strip()} -> {figure.strip()}")
+    return mispaired
+
+
+def find_invented_values(summary: str, source: str) -> List[str]:
+    """
+    Values present in `summary` but absent from `source`.
+
+    Compares only the categories where a wrong value changes the contract:
+    monetary amounts, percentages, day/month/year periods and dates. Numbers are
+    normalised (commas and spacing stripped) so "$10,000" and "$10000" match, and
+    a value that appears anywhere in the source counts as supported.
+    """
+    import re
+
+    source_values = extract_preserved_values(source)
+    summary_values = extract_preserved_values(summary)
+
+    def normalise(value: str) -> str:
+        return re.sub(r"[\s,]", "", value).lower()
+
+    supported = {
+        normalise(value)
+        for values in source_values.values()
+        for value in values
+    }
+    # Bare digit runs in the source also support a figure in the summary, since a
+    # contract writes "thirty (30) days" and a summary may render it "30 days".
+    supported |= {normalise(n) for n in re.findall(r"\d[\d,.]*", source)}
+
+    invented: List[str] = []
+    for category in ("money", "percent", "days", "dates"):
+        for value in summary_values.get(category, []):
+            candidate = normalise(value)
+            if candidate in supported:
+                continue
+            # A period like "30 days" is supported if its number appears at all.
+            digits = re.sub(r"[^\d.]", "", candidate)
+            if digits and digits in supported:
+                continue
+            invented.append(value)
+    return invented
+
+
 def extractive_summary(text: str, max_sentences: int = 3) -> str:
     """
     Pick the most informative sentences without any model.

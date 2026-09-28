@@ -57,11 +57,35 @@ SummarizationProvider
 Select with `SUMMARY_PROVIDER=local|gemini`. The model is configured centrally via
 `SUMMARIZATION_MODEL` and loaded once per process, never per chunk.
 
-> **Model note:** `SUMMARIZATION_MODEL` must be a checkpoint *fine-tuned for
-> summarization*. The default is `nsi319/legal-led-base-16384` (legal-domain LED,
-> 16k input tokens, ~600 MB). The plain `allenai/led-base-16384` is only
-> pretrained and will echo its input instead of summarizing — the provider detects
-> that and reports the result as degraded rather than passing it off as a summary.
+> **Model note:** `SUMMARIZATION_MODEL` must be fine-tuned for summarization *of
+> documents like these* — a stricter requirement than "legal" or "long context".
+> Two checkpoints that look right and are not:
+>
+> | Checkpoint | Problem |
+> |---|---|
+> | `allenai/led-base-16384` | Only pretrained, not fine-tuned. Echoes its input. |
+> | `nsi319/legal-led-base-16384` | Fine-tuned on SEC litigation releases. Emits fluent prose about court judgments and insider trading for *any* contract — fabrication, not summarization. |
+>
+> The default is therefore `Falconsai/text_summarization`, a small (60M) summarization
+> fine-tune that stays close to its source. It is largely extractive and modest in
+> quality, but faithful — which is the property that matters for a contract. Set
+> `SUMMARIZATION_MODEL` to substitute a larger model, and `SUMMARIZATION_FALLBACK_MODELS`
+> for what to try if it cannot be loaded.
+
+#### Output is gated before it is shown
+
+Every model output — at chunk, group, section and executive level — must pass three
+checks or it is replaced by an extract of the source, which cannot invent anything:
+
+| Check | Catches |
+|---|---|
+| **Grounding** (≥60% of content words appear in the source) | A checkpoint fine-tuned on the wrong domain, writing fluent text about something else |
+| **Invented values** | A monetary amount, percentage, period or date that is not in the source |
+| **Mis-paired values** | A figure attached to the wrong words — "Ten Thousand Dollars ($240,000 USD)" — where every value exists in the source but the term has been altered |
+
+When the model cannot summarize most sections, the result is flagged `degraded` with a
+reason, and the UI shows a banner. A silent fall back to verbatim text looks identical
+to a broken summarizer, so it is never silent.
 
 > **Deployment note:** each worker process that summarizes holds its own copy of
 > the model (~1 GB resident for LED-base in fp32). For more than two Uvicorn
@@ -194,6 +218,6 @@ chunking, embedding, the routes and the response schema all run as real code.
 ```bash
 cd backend
 PYTHONPATH=. ./venv/bin/python tests/test_audit_pipeline.py          # 92 checks
-PYTHONPATH=. ./venv/bin/python tests/test_summarization_pipeline.py  # 96 checks
+PYTHONPATH=. ./venv/bin/python tests/test_summarization_pipeline.py  # 148 checks
 ```
 

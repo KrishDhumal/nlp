@@ -65,6 +65,13 @@ class SectionSummary(BaseModel):
             return f"Page {self.page_start}"
         return f"Pages {self.page_start}-{self.page_end}"
 
+    @property
+    def section_label(self) -> str:
+        """Citation label, e.g. '5.4 Termination'."""
+        if self.section_number and self.section_title:
+            return f"{self.section_number} {self.section_title}"
+        return (self.section_number or self.section_title or "").strip()
+
 
 class SummaryResult(BaseModel):
     """

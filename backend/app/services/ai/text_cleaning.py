@@ -174,7 +174,14 @@ def clean_pages(raw_pages: List[Tuple[int, str]]) -> List[Tuple[int, str]]:
 _PRESERVE_PATTERNS: Dict[str, re.Pattern] = {
     "money": re.compile(r"(?:[$₹£€]\s?[\d,]+(?:\.\d+)?|\b(?:USD|INR|EUR|GBP)\s?[\d,]+)"),
     "percent": re.compile(r"\b\d+(?:\.\d+)?\s?%"),
-    "days": re.compile(r"\b\d+\s+(?:calendar |business |working )?days?\b", re.IGNORECASE),
+    # Contracts write periods as "thirty (30) calendar days", so the digits are
+    # usually followed by a closing parenthesis rather than whitespace. Requiring
+    # `\d+\s+days` made this check silently inert on real contract language.
+    "days": re.compile(
+        r"\b\d+\s*\)?\s*(?:calendar|business|working)?\s*"
+        r"(?:days?|months?|years?|weeks?)\b",
+        re.IGNORECASE,
+    ),
     "dates": re.compile(
         r"\b(?:January|February|March|April|May|June|July|August|September|October|"
         r"November|December)\s+\d{1,2},?\s+\d{4}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"

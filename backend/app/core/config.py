@@ -33,13 +33,25 @@ class Settings(BaseSettings):
     # ── Summarisation ────────────────────────────────────────────────────
     # "local" (default, no API key needed) or "gemini".
     SUMMARY_PROVIDER: str = os.getenv("SUMMARY_PROVIDER", "local")
-    # LED handles 16k input tokens, which suits long contracts, and a base-sized
-    # checkpoint is ~600 MB — feasible on a 16 GB machine without a GPU.
-    # This must be a checkpoint *fine-tuned for summarisation*: the plain
-    # `allenai/led-base-16384` base model is only pretrained, and echoes its
-    # input instead of summarising it. This one is fine-tuned on legal text.
+    # The checkpoint must be fine-tuned for summarisation *of documents like
+    # these*, which is a stricter requirement than "legal" or "long context":
+    #   - `allenai/led-base-16384` is only pretrained and echoes its input.
+    #   - `nsi319/legal-led-base-16384` is fine-tuned on SEC litigation releases,
+    #     and emits fluent press-release prose about court judgments no matter
+    #     what contract it is given — fabrication, not summarisation.
+    # This default is a small summarisation fine-tune that stays close to its
+    # source, which is the property that matters for a legal document. It is
+    # modest (60M parameters) and largely extractive; see the README for the
+    # trade-off and how to substitute a larger model.
     SUMMARIZATION_MODEL: str = os.getenv(
-        "SUMMARIZATION_MODEL", "nsi319/legal-led-base-16384"
+        "SUMMARIZATION_MODEL", "Falconsai/text_summarization"
+    )
+    # Tried in order if SUMMARIZATION_MODEL cannot be loaded (a stalled or rate
+    # limited first-run download is the common case). Comma-separated; each must
+    # be fine-tuned for summarisation. Set to an empty string to disable.
+    SUMMARIZATION_FALLBACK_MODELS: str = os.getenv(
+        "SUMMARIZATION_FALLBACK_MODELS",
+        "sshleifer/distilbart-cnn-12-6",
     )
     # Fine-tuned seq2seq summarisers are trained on raw article text, so an
     # instruction prefix pollutes the input and gets copied into the output.
@@ -53,6 +65,12 @@ class Settings(BaseSettings):
     SUMMARIZATION_MAX_OUTPUT_TOKENS: int = int(os.getenv("SUMMARIZATION_MAX_OUTPUT_TOKENS", "256"))
     SUMMARIZATION_MIN_OUTPUT_TOKENS: int = int(os.getenv("SUMMARIZATION_MIN_OUTPUT_TOKENS", "32"))
     SUMMARIZATION_BATCH_SIZE: int = int(os.getenv("SUMMARIZATION_BATCH_SIZE", "2"))
+    # Seconds to wait for the model to load (including a first-run download)
+    # before giving up and degrading to extractive summaries. Without a ceiling a
+    # stalled download leaves every upload stuck on "summarizing" forever.
+    SUMMARIZATION_LOAD_TIMEOUT: int = int(os.getenv("SUMMARIZATION_LOAD_TIMEOUT", "300"))
+    # Per-file HTTP timeout for Hugging Face downloads.
+    HF_DOWNLOAD_TIMEOUT: int = int(os.getenv("HF_HUB_DOWNLOAD_TIMEOUT", "30"))
     # Chunks per group at the reduce stage of hierarchical summarisation.
     SUMMARY_GROUP_SIZE: int = int(os.getenv("SUMMARY_GROUP_SIZE", "5"))
     # Documents with fewer chunks than this skip the intermediate reduce level.
