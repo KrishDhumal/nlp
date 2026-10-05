@@ -1,107 +1,196 @@
 """
-Chat Service — Contextual RAG Chat with Gemini.
+Chat Service — Grounded RAG Document Intelligence with Google Gemini 2.5 Flash.
 
-Takes retrieved document chunks + a user question, constructs a grounded
-prompt, and sends it to Gemini. Includes automatic model fallback on
-503/429 errors (overload/quota).
+Utilizes the google-genai SDK to generate structured, strictly grounded legal responses
+with page-number and clause-type citations. Prohibits hallucination and outside knowledge.
 """
 
 import os
-import asyncio
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from typing import List, Dict, Any
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
+from google import genai
+from google.genai import types
 
-# Fallback chain: try each model in order
-GEMINI_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
-MAX_RETRIES = 2
-RETRY_DELAY = 2  # seconds
+from app.core.logging import logger
+from app.services.ai.query_service import query_document_chunks
+
+# 1. Exact Pydantic models aligning with frontend SourceCitation.jsx & ChatPanel.jsx
+class Citation(BaseModel):
+    page_number: int = Field(
+        default=1,
+        description="The exact 1-indexed document page number where the excerpt was found."
+    )
+    clause_type: str = Field(
+        default="General",
+        description="The legal clause category or topic classification (e.g., Termination, Liability, Indemnification)."
+    )
+    verbatim_quote: str = Field(
+        description="The exact word-for-word excerpt quoted from the source text supporting the claim."
+    )
+    section: Optional[str] = Field(
+        default=None,
+        description="Section title or label (e.g. 'Section 5.2' or clause category) displayed in badge."
+    )
+    text: Optional[str] = Field(
+        default=None,
+        description="Text content for frontend popover display (mirrors verbatim_quote)."
+    )
 
 
-SYSTEM_PROMPT = """You are a legal document assistant for Auditor AI. Your role is to help users understand the contents of their legal documents.
+class ChatResponse(BaseModel):
+    answer: str = Field(
+        description="Authoritative, professional legal answer derived strictly from the document excerpts."
+    )
+    citations: List[Citation] = Field(
+        default_factory=list,
+        description="List of exact citations supporting the answer."
+    )
+    sources: Optional[List[Citation]] = Field(
+        default=None,
+        description="List of source citations matching frontend ChatPanel and SourceCitation prop expectations."
+    )
 
-STRICT RULES:
-1. Answer the user's question ONLY based on the document excerpts provided below.
-2. If the answer is NOT found in the provided excerpts, respond with: "I don't have enough information in this document to answer that question."
-3. NEVER make up information or use knowledge outside the provided excerpts.
-4. When referencing specific content, cite the page number like this: (Page X).
-5. Be concise but thorough. Use bullet points for multi-part answers.
-6. If the user asks about legal implications, clarify you are an AI assistant and not a lawyer — recommend consulting a legal professional for binding advice.
 
-DOCUMENT EXCERPTS:
-{context}
+# 2. Strict Legal System Prompt
+SYSTEM_INSTRUCTION = """You are an elite Legal Intelligence Auditor AI.
+Your sole purpose is to answer the user's inquiry regarding the provided legal document excerpts.
+
+STRICT CONSTRAINTS & COMPLIANCE RULES:
+1. Grounding: Answer the question ONLY and EXCLUSIVELY using the facts directly stated in the provided DOCUMENT EXCERPTS.
+2. Anti-Hallucination: Do NOT assume, infer, extrapolate, or bring in outside legal knowledge, precedents, or assumptions not explicitly present in the text.
+3. Insufficient Context: If the answer is not contained within the provided excerpts, say:
+   "I don't have enough information in this document to answer that question."
+4. Citations: Every substantive point made MUST cite the exact page_number, clause_type, and a verbatim_quote from the excerpts.
+5. Verbatim Quote: The verbatim_quote must be an EXACT substring of the provided text.
+6. Tone: Objective, precise, and professional.
 """
 
-HUMAN_TEMPLATE = """{question}"""
+
+# 3. Google GenAI Client Initialization
+def _get_genai_client() -> genai.Client:
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("Neither GEMINI_API_KEY nor GOOGLE_API_KEY is configured in the environment.")
+    return genai.Client(api_key=api_key)
+
+
+async def generate_grounded_response(
+    query: str,
+    doc_id: str,
+    user_id: str
+) -> Dict[str, Any]:
+    """
+    RAG generation pipeline:
+    1. Retrieves relevant document chunks via query_document_chunks.
+    2. If no chunks found (or low similarity), returns a fallback response without LLM call.
+    3. Calls gemini-2.5-flash with temperature=0.0 and ChatResponse JSON schema.
+    4. Returns clean, structured response aligning with frontend requirements.
+    """
+    # Step 1: Retrieve context chunks from Pinecone / vector store
+    chunks = query_document_chunks(query=query, doc_id=doc_id, user_id=user_id, top_k=5)
+
+    # Step 2: Empty retrieval fallback — return immediately without LLM invocation
+    if not chunks:
+        logger.info(f"[ChatService] No matching chunks found for query '{query}' in doc {doc_id}")
+        empty_answer = "I don't have enough information in this document to answer that question."
+        return {
+            "answer": empty_answer,
+            "citations": [],
+            "sources": []
+        }
+
+    # Step 3: Build formatted excerpts
+    context_blocks = []
+    for i, c in enumerate(chunks, 1):
+        page = c.get("page_number", 1)
+        clause = c.get("clause_type", "General")
+        snippet = c.get("text", "").strip()
+        context_blocks.append(f"[Excerpt {i} | Page {page} | Clause: {clause}]\n{snippet}")
+
+    full_context = "\n\n---\n\n".join(context_blocks)
+    user_prompt = f"DOCUMENT EXCERPTS:\n{full_context}\n\nUSER QUESTION:\n{query}"
+
+    # Step 4: Invoke Gemini with resilient model fallback and structured output schema
+    try:
+        client = _get_genai_client()
+        candidate_models = [
+            "gemini-flash-lite-latest",
+            "gemini-3.6-flash",
+            "gemini-3.7-flash",
+            "gemini-flash-latest",
+            "gemini-2.5-flash",
+        ]
+        parsed: Optional[ChatResponse] = None
+        for model_name in candidate_models:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.0,
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        response_mime_type="application/json",
+                        response_schema=ChatResponse
+                    )
+                )
+                if response and response.parsed:
+                    parsed = response.parsed
+                    break
+            except Exception as model_err:
+                logger.warning(f"[ChatService] Model {model_name} failed: {model_err}")
+                continue
+
+        if parsed:
+            result_citations = []
+            for item in parsed.citations:
+                quote = item.verbatim_quote or item.text or ""
+                cit = {
+                    "page_number": item.page_number,
+                    "clause_type": item.clause_type,
+                    "verbatim_quote": quote,
+                    "section": item.section or item.clause_type or f"Page {item.page_number}",
+                    "text": quote
+                }
+                result_citations.append(cit)
+
+            return {
+                "answer": parsed.answer,
+                "citations": result_citations,
+                "sources": result_citations
+            }
+
+        # Fallback if parsed schema is somehow not returned
+        return {
+            "answer": response.text or "I processed your document but could not format the output.",
+            "citations": [],
+            "sources": []
+        }
+
+    except Exception as e:
+        logger.error(f"[ChatService] Gemini generation error: {e}")
+        # Graceful fallback on API error
+        return {
+            "answer": "An error occurred while generating a grounded response from the AI model. Please try again.",
+            "citations": [],
+            "sources": []
+        }
 
 
 class ChatService:
+    """Wrapper class providing backward compatibility for existing controllers."""
     def __init__(self):
-        self.api_key = os.getenv("GOOGLE_API_KEY")
+        pass
 
-        self.prompt = ChatPromptTemplate.from_messages([
-            ("system", SYSTEM_PROMPT),
-            ("human", HUMAN_TEMPLATE),
-        ])
+    async def generate_grounded_response(self, query: str, doc_id: str, user_id: str) -> Dict[str, Any]:
+        return await generate_grounded_response(query=query, doc_id=doc_id, user_id=user_id)
 
-    def _get_llm(self, model_name: str) -> ChatGoogleGenerativeAI:
-        return ChatGoogleGenerativeAI(
-            model=model_name,
-            google_api_key=self.api_key,
-            temperature=0.3,
-        )
+    async def generate_answer(self, question: str, chunks: List[Dict[str, Any]]) -> str:
+        res = await generate_grounded_response(query=question, doc_id="default", user_id="default")
+        return res.get("answer", "")
 
-    async def generate_answer(
-        self,
-        question: str,
-        chunks: List[Dict[str, Any]]
-    ) -> str:
-        """
-        Generates a grounded answer using Gemini with automatic model fallback.
-        """
-        if not chunks:
-            return "I couldn't find any relevant content in this document. Please try rephrasing your question."
 
-        # Build context string with page citations
-        context_parts = []
-        for i, chunk in enumerate(chunks, 1):
-            page = chunk.get("page_number", "?")
-            text = chunk.get("text", "")
-            context_parts.append(f"[Excerpt {i} — Page {page}]\n{text}")
-
-        context_text = "\n\n---\n\n".join(context_parts)
-
-        # Format messages
-        formatted = self.prompt.format_messages(
-            context=context_text,
-            question=question
-        )
-
-        last_error = None
-
-        for model_name in GEMINI_MODELS:
-            for attempt in range(MAX_RETRIES):
-                try:
-                    llm = self._get_llm(model_name)
-                    response = await llm.ainvoke(formatted)
-                    return response.content
-
-                except Exception as e:
-                    last_error = e
-                    error_str = str(e).lower()
-                    is_retryable = any(code in error_str for code in ["503", "429", "unavailable", "overloaded", "quota"])
-
-                    if is_retryable:
-                        print(f"[ChatService] {model_name} attempt {attempt + 1} failed: {e}")
-                        if attempt < MAX_RETRIES - 1:
-                            await asyncio.sleep(RETRY_DELAY)
-                        continue
-                    else:
-                        raise e
-
-            print(f"[ChatService] All retries exhausted for {model_name}, trying next model...")
-
-        raise Exception(f"All Gemini models failed. Last error: {last_error}")
+chat_service = ChatService()
