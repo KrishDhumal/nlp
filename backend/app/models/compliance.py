@@ -6,7 +6,7 @@ class ComplianceCheckRequest(BaseModel):
     """Request body for POST /api/compliance/check."""
     audit_id: str = Field(..., description="The audit ID to run compliance check on")
     regulations: List[str] = Field(
-        default=["GDPR", "CCPA", "AI_ACT"],
+        default=["GDPR", "HIPAA", "SOC2"],
         description="List of regulations to check against"
     )
 

@@ -31,10 +31,20 @@ from app.core.logging import logger
 from app.domain.document import STAGE_PROGRESS, CanonicalDocument, ProcessingStatus
 from app.domain.summary import SummaryResult
 from app.services.ai.extraction import legal_extractor
+from app.services.ai.clauses import detect_clauses
 from app.services.ai.processor import DocumentProcessor, classify_clause_type
+from app.services.ai.risk import analyse_risk
 from app.services.ai.summarization.service import SummarizationService
 from app.services.ai.vector_store import vector_store_service
 from app.services.storage_service import storage_service
+
+# The optional LLM enrichment pass adds explanation text to clauses the
+# deterministic analysis already found. It is off by default: the analysis is
+# complete without it, and the Gemini SDK's call cannot be interrupted once it
+# begins backing off against a rate limit, which would otherwise hold a document
+# in "analyzing" long past any deadline set around it.
+ENABLE_LLM_ENRICHMENT = os.getenv("ENABLE_LLM_ENRICHMENT", "false").lower() == "true"
+LLM_ENRICHMENT_TIMEOUT = float(os.getenv("LLM_ENRICHMENT_TIMEOUT", "45"))
 
 
 class DocumentPipeline:
@@ -142,14 +152,20 @@ class DocumentPipeline:
             await self._set_status(db, audit_id, ProcessingStatus.SUMMARIZING)
             summary = await self._summarize(db, audit_id, document, clause_types)
 
-            # ── Optional LLM clause/risk analysis ────────────────────────
+            # ── Legal analysis: deterministic first, LLM as enrichment ───
             await self._set_status(db, audit_id, ProcessingStatus.ANALYZING)
-            analysis = await self._analyze(document)
+            detected_clauses = detect_clauses(document.chunks)
+            risk = analyse_risk(document.chunks, detected_clauses)
+            # The LLM pass is enrichment only. The deterministic analysis above
+            # is already complete, so a rate-limited or slow API must never hold
+            # the document in "analyzing" — it is bounded and then abandoned.
+            analysis = await self._analyze_bounded(document)
 
             # ── Persist everything on the one canonical record ───────────
             await self._set_status(db, audit_id, ProcessingStatus.FINALIZING)
             await self._persist(
                 db, audit_id, document, summary, analysis, index_result,
+                detected_clauses=detected_clauses, risk=risk,
                 elapsed=time.time() - started,
             )
 
@@ -194,6 +210,39 @@ class DocumentPipeline:
             )
         return summary
 
+    async def _analyze_bounded(self, document: CanonicalDocument) -> dict:
+        """
+        Run the optional LLM enrichment, bounded and abandonable.
+
+        The call runs as its own task so the deadline applies to *this* coroutine
+        rather than to the SDK's internal retry loop. On timeout the task is
+        cancelled and the pipeline moves on; the deterministic analysis is
+        already complete, so nothing is lost but the extra prose.
+        """
+        import asyncio
+
+        if not ENABLE_LLM_ENRICHMENT:
+            logger.info(
+                "[Pipeline] LLM enrichment disabled (ENABLE_LLM_ENRICHMENT=false) "
+                "— using the deterministic analysis alone."
+            )
+            return {}
+
+        task = asyncio.ensure_future(self._analyze(document))
+        try:
+            return await asyncio.wait_for(asyncio.shield(task),
+                                          timeout=LLM_ENRICHMENT_TIMEOUT)
+        except asyncio.TimeoutError:
+            task.cancel()
+            logger.warning(
+                f"[Pipeline] LLM enrichment exceeded {LLM_ENRICHMENT_TIMEOUT}s "
+                "— continuing with the deterministic analysis."
+            )
+            return {}
+        except Exception as e:
+            logger.warning(f"[Pipeline] LLM enrichment failed: {e}")
+            return {}
+
     async def _analyze(self, document: CanonicalDocument) -> dict:
         """
         Optional LLM clause/risk analysis.
@@ -230,7 +279,8 @@ class DocumentPipeline:
     # ────────────────────────────────────────────────────────────────────
     async def _persist(
         self, db, audit_id: str, document: CanonicalDocument,
-        summary: SummaryResult, analysis: dict, index_result: dict, elapsed: float,
+        summary: SummaryResult, analysis: dict, index_result: dict,
+        detected_clauses: list, risk, elapsed: float,
     ) -> None:
         """
         Write results onto the single `audits` record.
@@ -318,37 +368,46 @@ class DocumentPipeline:
             "degraded_reason": summary.degraded_reason,
         }
 
-        # The LLM risk analysis is additive — absent keys leave the summary intact.
+        # Deterministic analysis is the baseline — it always runs, needs no API
+        # key, and every finding is evidenced by text in the document.
+        risk_payload = risk.to_dict()
+        update["clauses"] = [
+            clause.to_ui_clause(index + 1)
+            for index, clause in enumerate(detected_clauses)
+        ]
+        update["detected_clauses"] = [clause.to_dict() for clause in detected_clauses]
+        update["risks"] = risk_payload["risks"]
+        update["risk_score"] = risk_payload["risk_score"]
+        update["risk_level"] = risk_payload["risk_level"]
+        update["risk_counts"] = risk_payload["risk_counts"]
+        update["risk_assessable"] = risk_payload["assessable"]
+        update["risk_note"] = risk_payload["risk_note"]
+        update["missing_clauses"] = risk_payload["missing_clauses"]
+        update["suggestions"] = [
+            finding.recommendation for finding in risk.findings if finding.recommendation
+        ][:15]
+
+        # The LLM pass, when a key is configured, only *adds* explanation to
+        # clauses it recognises. It never overwrites a deterministic finding,
+        # so an unavailable or rate-limited model cannot degrade the analysis.
         if analysis:
-            update["risks"] = analysis.get("risks", [])
-            update["clauses"] = analysis.get("clauses", [])
-            update["missing_clauses"] = analysis.get("missing_clauses", [])
-            update["suggestions"] = analysis.get("suggestions", [])
-            update["risk_score"] = analysis.get("risk_score", 0)
-            update["risk_counts"] = analysis.get("risk_counts", {})
+            llm_by_title = {
+                str(c.get("title", "")).lower(): c for c in analysis.get("clauses", [])
+            }
+            for clause in update["clauses"]:
+                enrichment = llm_by_title.get(clause["title"].lower())
+                if enrichment:
+                    clause["explanation"] = (
+                        enrichment.get("explanation") or clause["explanation"]
+                    )
+                    clause["recommendation"] = (
+                        enrichment.get("recommendation") or clause["recommendation"]
+                    )
             if analysis.get("contract_type"):
                 update["document_type"] = analysis["contract_type"]
+            update["llm_enriched"] = True
         else:
-            # Clause cards still render, built from the deterministic pass.
-            update["clauses"] = [
-                {
-                    "id": f"c{index + 1}",
-                    "category": item.type,
-                    "title": item.section_title or item.type,
-                    "page_number": item.source_pages[0] if item.source_pages else 1,
-                    "section": item.label,
-                    "risk_level": "Low",
-                    "snippet": item.summary[:400],
-                    "explanation": "",
-                    "recommendation": "",
-                }
-                for index, item in enumerate(summary.important_clauses)
-            ]
-            update["risks"] = []
-            update["suggestions"] = [item.summary for item in summary.attention_points]
-            update["missing_clauses"] = []
-            update["risk_score"] = 0
-            update["risk_counts"] = {}
+            update["llm_enriched"] = False
 
         await db["audits"].update_one({"_id": audit_id}, {"$set": update})
 

@@ -32,9 +32,7 @@ const ChatPanel = ({ auditId, fileName, isOpen, onClose }) => {
       const initialGreeting = {
         role: 'assistant',
         content: `Hello! 👋 I'm your Legal AI Assistant. I've indexed "${fileName || 'your document'}" using RAG (Retrieval-Augmented Generation).\n\nFeel free to ask me anything about termination windows, payment penalties, liability caps, or key obligations. Every answer I provide is strictly grounded with source citations!`,
-        sources: [
-          { page_number: 1, section: "Overview", text: "Indexed contract document for grounded RAG Q&A." }
-        ],
+        sources: [],
         timestamp: new Date()
       };
       setMessages([initialGreeting]);
@@ -83,64 +81,28 @@ const ChatPanel = ({ auditId, fileName, isOpen, onClose }) => {
       const aiMessage = {
         role: 'assistant',
         content: data.answer || "I have scanned the document text. Here is the relevant breakdown grounded in the source text.",
-        sources: data.sources && data.sources.length > 0 ? data.sources : [
-          { page_number: 2, section: "Sec 3.1", text: "Matching text snippet extracted from contract source." }
-        ],
+        // Only real citations. A placeholder citation implies evidence that
+        // does not exist.
+        sources: data.sources || [],
         timestamp: new Date()
       };
       setMessages(prev => [...prev, aiMessage]);
       setCooldown(3);
     } catch (err) {
-      // Fallback demo response if backend is offline/WIP
-      const demoResponse = getDemoResponse(question);
-      setMessages(prev => [...prev, demoResponse]);
+      // Never fabricate an answer: an invented clause with an invented citation
+      // is indistinguishable from a grounded one. Surface the failure instead.
+      setError(err.message || 'Could not reach the assistant. Please try again.');
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `I could not answer that: ${err.message || 'the assistant is unavailable.'}\n\nNothing above is a statement about your document.`,
+        sources: [],
+        isError: true,
+        timestamp: new Date(),
+      }]);
       setCooldown(2);
     } finally {
       setIsLoading(false);
     }
-  };
-
-  /** Friendly mock fallback responses for frontend UI demo */
-  const getDemoResponse = (q) => {
-    const lower = q.toLowerCase();
-    if (lower.includes('termination') || lower.includes('notice')) {
-      return {
-        role: 'assistant',
-        content: 'According to Section 5.4 (Page 3), either party may terminate this agreement for convenience by providing thirty (30) days prior written notice. In case of uncured material breach, termination takes effect after a 14-day cure window.',
-        sources: [
-          { page_number: 3, section: 'Sec 5.4', text: 'Either party may terminate this Agreement for convenience upon 30 days prior written notice.' }
-        ],
-        timestamp: new Date()
-      };
-    }
-    if (lower.includes('payment') || lower.includes('interest') || lower.includes('fee')) {
-      return {
-        role: 'assistant',
-        content: 'Payment terms are Net-30 from invoice receipt date (Section 3.1, Page 2). Late payments accrue interest at 1.5% per month (18% per annum) or the maximum allowed by law.',
-        sources: [
-          { page_number: 2, section: 'Sec 3.1', text: 'Invoices are payable within 30 days. Overdue balances incur 1.5% monthly interest.' }
-        ],
-        timestamp: new Date()
-      };
-    }
-    if (lower.includes('liability') || lower.includes('cap')) {
-      return {
-        role: 'assistant',
-        content: 'Under Section 8.2 (Page 4), aggregate liability for all claims is capped at total fees paid in the preceding 12 months. Consequential, indirect, and punitive damages are mutually waived.',
-        sources: [
-          { page_number: 4, section: 'Sec 8.2', text: 'Liability is capped at 12 months total fees paid. Indirect damages are excluded.' }
-        ],
-        timestamp: new Date()
-      };
-    }
-    return {
-      role: 'assistant',
-      content: `I searched the document for "${q}". Based on the uploaded contract text, key terms and conditions apply as outlined in the main provisions.`,
-      sources: [
-        { page_number: 1, section: 'Preamble', text: 'Contractual terms and conditions of agreement.' }
-      ],
-      timestamp: new Date()
-    };
   };
 
   const handleCopyMessage = (index, content) => {

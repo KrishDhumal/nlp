@@ -421,16 +421,29 @@ def test_api(pdf_bytes: bytes) -> None:
               f"{len(data['entities']['financials'])} financials")
         print(f"    suggestions   : {len(data['suggestions'])}\n")
 
+        # Clauses and risks are now produced by the deterministic analysis layer
+        # over the canonical chunks, not by the LLM. The LLM only enriches
+        # explanations, so these assert the deterministic contract. (The LLM
+        # normalisers are still unit-tested in section 5.)
         categories = [c["category"] for c in data["clauses"]]
-        check("maps loose category names onto the canonical seven",
+        check("clauses are detected from the document itself",
+              len(data["clauses"]) > 0, f"{len(data['clauses'])} clauses")
+        check("clauses map onto the UI categories",
               {"Termination", "Liability", "IP Rights"} <= set(categories), str(categories))
-        check("maps an unrecognised category to 'Other'", "Other" in categories)
-        check("drops a clause with no title and no snippet", len(data["clauses"]) == 4,
-              f"{len(data['clauses'])} clauses")
+        check("every clause quotes source text from the document",
+              all(c["snippet"] for c in data["clauses"]))
+        check("every clause cites a page inside the document",
+              all(1 <= c["page_number"] <= data["page_count"] for c in data["clauses"]),
+              str(sorted({c["page_number"] for c in data["clauses"]})))
 
-        severities = [r["severity"] for r in data["risks"]]
-        check("normalises severities and drops the titleless risk",
-              severities == ["High", "Critical", "Medium", "Medium"], str(severities))
+        severities = {r["severity"] for r in data["risks"]}
+        check("risk findings are produced from the document",
+              len(data["risks"]) > 0, f"{len(data['risks'])} risks")
+        check("risk severities are valid",
+              severities <= {"Low", "Medium", "High", "Critical"}, str(severities))
+        check("a risk score of 0 is not reported as assessable without findings",
+              data["risk_score"] > 0 or not data["risks"],
+              f"score={data['risk_score']}")
 
         check("drops a party with no name", len(data["entities"]["parties"]) == 2)
 

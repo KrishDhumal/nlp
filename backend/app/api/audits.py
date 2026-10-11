@@ -83,7 +83,13 @@ def _to_response(audit: dict) -> dict:
         missing_clauses=audit.get("missing_clauses", []),
         suggestions=audit.get("suggestions", []),
         risk_score=audit.get("risk_score", 0),
+        risk_level=audit.get("risk_level", "Unknown"),
+        risk_assessable=audit.get("risk_assessable", False),
+        risk_note=audit.get("risk_note", ""),
         risk_counts=audit.get("risk_counts", {}),
+        detected_clauses=audit.get("detected_clauses", []),
+        compliance=audit.get("compliance"),
+        llm_enriched=audit.get("llm_enriched", False),
 
         page_count=audit.get("page_count", 0),
         section_count=audit.get("section_count", 0),

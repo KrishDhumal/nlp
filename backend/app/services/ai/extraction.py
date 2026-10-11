@@ -34,10 +34,12 @@ _DEFINED_PARTY = re.compile(
 )
 
 # Fallback: an entity with a corporate suffix.
+# The suffix must be a whole word: without the trailing boundary, "AG" matches
+# inside "AGREEMENT" and every document reports itself as an organisation.
 _ENTITY = re.compile(
     r"\b([A-Z][A-Za-z0-9&.'\- ]{2,60}?"
     r"(?:Inc|Incorporated|LLC|L\.L\.C|Ltd|Limited|Corp|Corporation|Company|"
-    r"GmbH|PLC|LLP|Pvt|Private Limited|AG|SA|BV)\.?)"
+    r"GmbH|PLC|LLP|Pvt|Private Limited|AG|SA|BV)\.?)(?![A-Za-z])"
 )
 
 _ROLE_WORDS = {
@@ -58,6 +60,35 @@ _ADDRESS = re.compile(
     r"Court|Ct|Circle|Suite|Floor)\.?"
     r"(?:,\s*[A-Z][A-Za-z ]{2,30})?"
     r"(?:,\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)?)"
+)
+
+# Bodies a contract commonly names, where the name itself is the evidence.
+_INSTITUTION = re.compile(
+    r"\b(?:American Arbitration Association|International Chamber of Commerce|"
+    r"London Court of International Arbitration|Securities and Exchange Commission|"
+    r"Information Commissioner'?s Office|Department of [A-Z][a-z]+|"
+    r"Ministry of [A-Z][a-z]+|Reserve Bank of [A-Z][a-z]+|"
+    r"[A-Z][A-Za-z]* (?:University|Institute|Hospital|Bank|Authority|Commission|Board))\b"
+)
+
+# "Attn: Jane Smith" / "Attention: Jane Smith"
+_ATTENTION_PERSON = re.compile(
+    r"(?:Attn|Attention)\.?\s*:?\s*([A-Z][A-Za-z.\-]+(?:\s+[A-Z][A-Za-z.\-]+){0,3})"
+)
+
+# Legal references
+_STATUTE = re.compile(
+    r"\b(?:[A-Z][A-Za-z]+\s+){0,4}Act(?:,?\s+\d{4})?\b"
+    r"|\bGDPR\b|\bHIPAA\b|\bCCPA\b|\bSOC\s?2\b|\bPCI[- ]DSS\b"
+)
+_REGULATION = re.compile(
+    r"\b(?:Article|Art\.|Regulation|Rule|Clause)\s+\d+(?:\(\w+\))?(?:\s*\(\w+\))*\b"
+    r"|\bSection\s+\d+(?:\.\d+)*\b"
+    r"|\b\d+\s*U\.?S\.?C\.?\s*§?\s*\d+\b"
+)
+_COURT = re.compile(
+    r"\b(?:Supreme Court|High Court|District Court|Court of Appeal[s]?|"
+    r"[A-Z][a-z]+ County Court[s]?|courts? of [A-Z][A-Za-z ]{2,30})\b"
 )
 
 # ── Dates and periods ───────────────────────────────────────────────────────
@@ -216,8 +247,11 @@ class LegalExtractor:
     def extract_all(self, chunks: List[Chunk]) -> Dict[str, List[SummaryItem]]:
         return {
             "parties": self.extract_parties(chunks),
+            "organizations": self.extract_organizations(chunks),
+            "people": self.extract_people(chunks),
             "key_dates": self.extract_dates(chunks),
             "financial_terms": self.extract_financials(chunks),
+            "legal_references": self.extract_legal_references(chunks),
             "key_obligations": self.extract_obligations(chunks),
             "attention_points": self.extract_restrictions(chunks),
         }
@@ -413,6 +447,94 @@ class LegalExtractor:
                     section_title=chunk.section_title,
                 ))
         return items[:_MAX_PER_CATEGORY]
+
+    # ── Organizations ───────────────────────────────────────────────────
+    def extract_organizations(self, chunks: List[Chunk]) -> List[SummaryItem]:
+        """
+        Companies, firms, institutions and regulators named in the document.
+
+        Matched on corporate suffixes and on the names of bodies a contract
+        typically references, so an organisation is only reported when the text
+        actually names one.
+        """
+        found: Dict[str, SummaryItem] = {}
+        for chunk in chunks:
+            text = chunk.text or ""
+            for match in _ENTITY.finditer(text):
+                name = self._trim_leading_noise(
+                    re.sub(r"\s+", " ", match.group(1)).strip(" ,.;")
+                )
+                if len(name) < 5 or name.lower() in _ROLE_WORDS:
+                    continue
+                if name not in found:
+                    found[name] = SummaryItem(
+                        type="organization", label="Organization", value=name,
+                        summary=_truncate(_window(text, match.start(), match.end()), 200),
+                        source_pages=[chunk.page_start],
+                        section_title=chunk.section_title,
+                    )
+            for match in _INSTITUTION.finditer(text):
+                name = re.sub(r"\s+", " ", match.group(0)).strip(" ,.;")
+                if name not in found:
+                    found[name] = SummaryItem(
+                        type="organization", label="Institution", value=name,
+                        summary=_truncate(_window(text, match.start(), match.end()), 200),
+                        source_pages=[chunk.page_start],
+                        section_title=chunk.section_title,
+                    )
+        return list(found.values())[:_MAX_PER_CATEGORY]
+
+    # ── People ──────────────────────────────────────────────────────────
+    def extract_people(self, chunks: List[Chunk]) -> List[SummaryItem]:
+        """
+        Individuals named as signatories, representatives or notice contacts.
+
+        Only names attached to a signing or contact cue are taken; a bare
+        capitalised phrase is far too easy to mistake for a person.
+        """
+        found: Dict[str, SummaryItem] = {}
+        for chunk in chunks:
+            text = chunk.text or ""
+            for pattern, role in ((_SIGNATORY, "Signatory"),
+                                  (_ATTENTION_PERSON, "Contact")):
+                for match in pattern.finditer(text):
+                    name = re.sub(r"\s+", " ", match.group(1)).strip(" ,.;")
+                    if not (4 <= len(name) <= 60) or name.lower() in _ROLE_WORDS:
+                        continue
+                    title = ""
+                    if pattern is _SIGNATORY and match.lastindex and match.lastindex >= 2:
+                        title = re.sub(r"\s+", " ", match.group(2) or "").strip(" ,.;")
+                    if name not in found:
+                        found[name] = SummaryItem(
+                            type="person", label=title or role, value=name,
+                            summary=_truncate(
+                                _window(text, match.start(), match.end()), 200),
+                            source_pages=[chunk.page_start],
+                            section_title=chunk.section_title,
+                        )
+        return list(found.values())[:_MAX_PER_CATEGORY]
+
+    # ── Legal references ────────────────────────────────────────────────
+    def extract_legal_references(self, chunks: List[Chunk]) -> List[SummaryItem]:
+        """Acts, regulations, courts and cited sections."""
+        found: Dict[str, SummaryItem] = {}
+        for chunk in chunks:
+            text = chunk.text or ""
+            for pattern, label in ((_STATUTE, "Statute"),
+                                   (_REGULATION, "Regulation"),
+                                   (_COURT, "Court")):
+                for match in pattern.finditer(text):
+                    value = re.sub(r"\s+", " ", match.group(0)).strip(" ,.;")
+                    key = value.lower()
+                    if key in found or len(value) < 4:
+                        continue
+                    found[key] = SummaryItem(
+                        type="legal_reference", label=label, value=value,
+                        summary=_truncate(_window(text, match.start(), match.end()), 200),
+                        source_pages=[chunk.page_start],
+                        section_title=chunk.section_title,
+                    )
+        return list(found.values())[:_MAX_PER_CATEGORY]
 
     # ── Jurisdiction ────────────────────────────────────────────────────
     def extract_jurisdiction(self, chunks: List[Chunk]) -> Dict[str, object]:

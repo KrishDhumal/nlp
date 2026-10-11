@@ -138,7 +138,15 @@ class AuditResponse(BaseModel):
     suggestions: List[str] = Field(default_factory=list)
 
     risk_score: int = Field(default=0, ge=0, le=100)
+    risk_level: str = "Unknown"
+    # False when too little contract language was found to judge. A score of 0
+    # with assessable=False means "unknown", not "safe".
+    risk_assessable: bool = False
+    risk_note: str = ""
     risk_counts: dict = Field(default_factory=dict)
+    detected_clauses: List[dict] = Field(default_factory=list)
+    compliance: Optional[dict] = None
+    llm_enriched: bool = False
 
     page_count: int = 0
     section_count: int = 0
