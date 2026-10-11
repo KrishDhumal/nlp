@@ -45,6 +45,46 @@ const CLAUSE_FILTERS = [
 
 const MAX_UPLOAD_MB = 20;
 
+/**
+ * Renders `text` with `terms` marked.
+ *
+ * The terms are the phrases the clause detector actually matched on, so the
+ * highlight shows the reader why this passage was flagged. Longest terms are
+ * matched first so "prior written notice" wins over "notice", and the regex is
+ * escaped because legal phrases contain punctuation.
+ */
+const HighlightedText = ({ text, terms = [], className = '' }) => {
+  if (!text) return null;
+  const cleaned = (terms || []).filter(Boolean).sort((a, b) => b.length - a.length);
+  if (cleaned.length === 0) return <span className={className}>{text}</span>;
+
+  const escaped = cleaned.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  let parts;
+  try {
+    parts = text.split(new RegExp(`(${escaped.join('|')})`, 'gi'));
+  } catch {
+    return <span className={className}>{text}</span>;
+  }
+
+  const lookup = new Set(cleaned.map(t => t.toLowerCase()));
+  return (
+    <span className={className}>
+      {parts.map((part, i) =>
+        lookup.has((part || '').toLowerCase()) ? (
+          <mark
+            key={i}
+            className="bg-amber-200/70 dark:bg-amber-400/30 text-slate-900 dark:text-amber-100 rounded px-0.5 font-semibold not-italic"
+          >
+            {part}
+          </mark>
+        ) : (
+          <React.Fragment key={i}>{part}</React.Fragment>
+        )
+      )}
+    </span>
+  );
+};
+
 /** Consistent placeholder for a tab or grid the audit returned nothing for. */
 const EmptyState = ({ icon: Icon, message }) => (
   <div className="flex flex-col items-center justify-center py-10 text-center gap-2">
@@ -522,6 +562,11 @@ const AuditNew = () => {
                                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${getRiskBadgeStyle(clause.risk_level)}`}>
                                   {clause.risk_level} Risk
                                 </span>
+                                {clause.confidence > 0 && (
+                                  <span className="text-[10px] font-semibold text-slate-400 dark:text-slate-500" title="Detector confidence">
+                                    {Math.round(clause.confidence * 100)}%
+                                  </span>
+                                )}
                               </div>
                               <SourceCitation citation={{ page_number: clause.page_number, section: clause.section, text: clause.snippet }} />
                             </div>
@@ -532,7 +577,7 @@ const AuditNew = () => {
 
                             {/* Original Text Snippet */}
                             <div className="bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-100 dark:border-slate-800 text-[11px] font-mono text-slate-700 dark:text-slate-300 leading-relaxed italic relative pl-4 border-l-2 border-l-blue-500">
-                              "{clause.snippet}"
+                              "<HighlightedText text={clause.snippet} terms={clause.matched_terms} />"
                             </div>
 
                             {/* Plain English Explanation */}
@@ -685,6 +730,17 @@ const AuditNew = () => {
                           <p className="text-[12px] text-slate-600 dark:text-slate-400 leading-relaxed pl-6">
                             {risk.description}
                           </p>
+                          {risk.snippet && (
+                            <div className="mt-2 ml-6 bg-white/70 dark:bg-slate-900/50 border border-red-100 dark:border-red-900/40 rounded-lg p-2.5 text-[11px] font-mono italic text-slate-700 dark:text-slate-300 leading-relaxed">
+                              "{risk.snippet}"
+                            </div>
+                          )}
+                          {risk.recommendation && (
+                            <div className="mt-2 ml-6 flex items-start gap-2 text-[11px] text-slate-600 dark:text-slate-400">
+                              <Lightbulb size={13} className="text-amber-500 shrink-0 mt-0.5" />
+                              <span className="font-medium">{risk.recommendation}</span>
+                            </div>
+                          )}
                         </div>
                       ))
                     ) : (

@@ -25,11 +25,15 @@ class Clause(BaseModel):
     category: str                     # one of CLAUSE_CATEGORIES, or "Other"
     title: str
     page_number: int = 1
+    page_end: int = 1
     section: str = ""
     risk_level: str = "Low"           # Low | Medium | High | Critical
     snippet: str = ""
     explanation: str = ""
     recommendation: str = ""
+    # Phrases that evidenced this clause, highlighted inside the snippet.
+    matched_terms: List[str] = Field(default_factory=list)
+    confidence: float = 0.0
 
 
 class SectionSummary(BaseModel):

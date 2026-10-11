@@ -99,6 +99,9 @@ class SummarizationService:
             on_progress(55, "Extracting key entities...")
         facts = legal_extractor.extract_all(chunks)
         result.parties = facts["parties"]
+        result.organizations = facts.get("organizations", [])
+        result.people = facts.get("people", [])
+        result.legal_references = facts.get("legal_references", [])
         result.key_dates = facts["key_dates"]
         result.financial_terms = facts["financial_terms"]
         result.key_obligations = facts["key_obligations"]

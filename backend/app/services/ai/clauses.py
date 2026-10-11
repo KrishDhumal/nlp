@@ -221,6 +221,11 @@ class DetectedClause:
             "snippet": self.source_text,
             "explanation": self.description,
             "recommendation": self.recommendation,
+            # The exact phrases that triggered detection, so the UI can mark the
+            # operative language inside the quote rather than just showing it.
+            "matched_terms": self.matched_terms[:6],
+            "confidence": round(self.confidence, 2),
+            "page_end": self.page_end,
         }
 
 

@@ -344,6 +344,30 @@ class DocumentPipeline:
                     for f in summary.financial_terms
                 ],
                 "jurisdiction": jurisdiction,
+                "organizations": [
+                    {
+                        "name": o.value or o.summary, "role": o.label,
+                        "page_number": o.source_pages[0] if o.source_pages else 1,
+                        "section": o.section_title,
+                    }
+                    for o in summary.organizations
+                ],
+                "people": [
+                    {
+                        "name": p.value or p.summary, "role": p.label,
+                        "page_number": p.source_pages[0] if p.source_pages else 1,
+                        "section": p.section_title,
+                    }
+                    for p in summary.people
+                ],
+                "legal_references": [
+                    {
+                        "value": lr.value, "type": lr.label,
+                        "page_number": lr.source_pages[0] if lr.source_pages else 1,
+                        "section": lr.section_title,
+                    }
+                    for lr in summary.legal_references
+                ],
             },
 
             # Chunk index, so chat and comparison can cite without re-parsing

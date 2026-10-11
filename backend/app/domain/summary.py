@@ -95,6 +95,9 @@ class SummaryResult(BaseModel):
     executive_summary: str = ""
 
     parties: List[SummaryItem] = Field(default_factory=list)
+    organizations: List[SummaryItem] = Field(default_factory=list)
+    people: List[SummaryItem] = Field(default_factory=list)
+    legal_references: List[SummaryItem] = Field(default_factory=list)
     key_dates: List[SummaryItem] = Field(default_factory=list)
     financial_terms: List[SummaryItem] = Field(default_factory=list)
     key_obligations: List[SummaryItem] = Field(default_factory=list)
