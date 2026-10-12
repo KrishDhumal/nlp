@@ -23,7 +23,11 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
 from app.domain.document import Chunk
-from app.services.ai.clauses import DetectedClause, missing_clause_types
+from app.services.ai.clauses import (
+    DetectedClause,
+    missing_clause_types,
+    _expected_clauses_for_document_type,
+)
 
 SEVERITIES = ("Low", "Medium", "High", "Critical")
 _SEVERITY_WEIGHT = {"Critical": 25, "High": 15, "Medium": 8, "Low": 3}
@@ -237,12 +241,18 @@ def _evidence(text: str, match: re.Match, limit: int = 260) -> str:
 def analyse_risk(
     chunks: Sequence[Chunk],
     clauses: Optional[Sequence[DetectedClause]] = None,
+    document_type: str = "",
 ) -> RiskAssessment:
     """
     Score the document and list every risk finding with its evidence.
 
     The score starts at 100 and is reduced by severity-weighted findings. It is
     only meaningful when something was actually assessable — see `assessable`.
+
+    When `document_type` is provided the missing-clause check uses the
+    expectation set appropriate for that kind of agreement, so estate-planning
+    or attorney-engagement documents are not penalised for missing commercial
+    clauses like IP, Force Majeure, or Indemnification.
     """
     clauses = list(clauses or [])
     findings: List[RiskFinding] = []
@@ -270,8 +280,13 @@ def analyse_risk(
                 rule_id=rule.rule_id,
             ))
 
-    missing = missing_clause_types(clauses) if clauses else []
+    missing = missing_clause_types(clauses, document_type=document_type) if clauses else []
+    expected = set(_expected_clauses_for_document_type(document_type))
     for name in missing:
+        # Only flag clauses that are actually expected for this document type.
+        # Clauses outside the expected set are marked N/A and not penalised.
+        if name not in expected:
+            continue
         findings.append(RiskFinding(
             title=f"No {name.lower()} clause found",
             severity=_MISSING_SEVERITY.get(name, "Medium"),

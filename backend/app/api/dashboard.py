@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List, Dict, Any
 from app.api.deps import get_db, get_current_user
@@ -44,14 +45,25 @@ async def get_recent_audits(current_user: dict = Depends(get_current_user), db=D
     user_id_str = str(current_user["_id"])
     
     query = {"user_id": user_id_str}
-    cursor = audits_collection.find(query).sort("created_at", -1).limit(5)
-    audits = await cursor.to_list(length=5)
+    cursor = audits_collection.find(query).sort("created_at", -1).limit(3)
+    audits = await cursor.to_list(length=3)
     
     formatted_audits = []
     for a in audits:
         a["_id"] = str(a["_id"])
         if "user_id" in a:
             a["user_id"] = str(a["user_id"])
+        
+        created_at = a.get("created_at")
+        if created_at:
+            if isinstance(created_at, datetime):
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                a["created_at"] = created_at.isoformat()
+            elif isinstance(created_at, str):
+                if not created_at.endswith("Z") and "+" not in created_at:
+                    a["created_at"] = created_at + "Z"
+                    
         formatted_audits.append(a)
         
     return formatted_audits
@@ -83,13 +95,23 @@ async def get_notifications(current_user: dict = Depends(get_current_user), db=D
             message = f"Audit completed for {a.get('file_name', 'document')} — No risks found"
         
         created_at = a.get("created_at")
+        iso_created_at = None
+        if created_at:
+            if isinstance(created_at, datetime):
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                iso_created_at = created_at.isoformat()
+            elif isinstance(created_at, str):
+                iso_created_at = created_at if (created_at.endswith("Z") or "+" in created_at) else created_at + "Z"
+
         notifications.append({
             "id": str(a["_id"]),
             "type": notif_type,
             "message": message,
             "file_name": a.get("file_name", "Unknown"),
             "risk_score": a.get("risk_score", 0),
-            "created_at": created_at.isoformat() if created_at else None
+            "created_at": iso_created_at
         })
     
     return notifications
+

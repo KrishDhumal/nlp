@@ -569,6 +569,20 @@ class LegalExtractor:
 
     # ── Document type ───────────────────────────────────────────────────
     _TYPE_HINTS = [
+        ("estate planning", "Estate Planning Agreement"),
+        ("attorney engagement", "Attorney Engagement Letter"),
+        ("engagement letter", "Attorney Engagement Letter"),
+        ("retainer agreement", "Attorney Retainer Agreement"),
+        ("attorney retainer", "Attorney Retainer Agreement"),
+        ("law firm engagement", "Attorney Engagement Letter"),
+        ("legal services agreement", "Legal Services Agreement"),
+        ("legal representation", "Legal Representation Agreement"),
+        ("power of attorney", "Power of Attorney"),
+        ("trust agreement", "Trust Agreement"),
+        ("living trust", "Living Trust Agreement"),
+        ("will and testament", "Will and Testament"),
+        ("last will", "Will and Testament"),
+        ("advance directive", "Advance Directive"),
         ("master services agreement", "Master Services Agreement"),
         ("non-disclosure agreement", "Non-Disclosure Agreement"),
         ("mutual non-disclosure", "Mutual Non-Disclosure Agreement"),

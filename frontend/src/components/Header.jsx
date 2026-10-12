@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Search, Bell, Mail, X, AlertTriangle, CheckCircle, ShieldAlert } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
+import { formatTimeAgo } from '../utils/dateUtils';
 
 
 const Header = () => {
@@ -45,12 +46,7 @@ const Header = () => {
   };
 
   const getTimeAgo = (isoString) => {
-    if (!isoString) return '';
-    const diff = Math.round((Date.now() - new Date(isoString).getTime()) / 60000);
-    if (diff < 1) return 'Just now';
-    if (diff < 60) return `${diff}m ago`;
-    if (diff < 1440) return `${Math.round(diff / 60)}h ago`;
-    return `${Math.round(diff / 1440)}d ago`;
+    return formatTimeAgo(isoString);
   };
 
   const getNotifIcon = (type) => {

@@ -70,17 +70,14 @@ async def compare_audits(
     """Compare two versions of a document and persist the result."""
     user_id = str(current_user["_id"])
 
-    if request.audit_id_a == request.audit_id_b:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Select two different documents to compare.",
-        )
-
+    # If comparing the same document with itself, allow it — it will report identical match.
     audit_a = await _load_owned_audit(db, request.audit_id_a, user_id, "Document A")
     audit_b = await _load_owned_audit(db, request.audit_id_b, user_id, "Document B")
 
     name_a = audit_a.get("file_name", "Version A")
     name_b = audit_b.get("file_name", "Version B")
+    if request.audit_id_a == request.audit_id_b:
+        name_b = f"{name_a} (Copy)"
 
     try:
         chunks_a = _chunks_for(audit_a, user_id)
@@ -102,6 +99,43 @@ async def compare_audits(
 
     result = compare_service.compare(chunks_a, chunks_b, name_a, name_b)
     payload = result.to_dict()
+
+    # Format clauses list with citations and status for the UI
+    status_map = {
+        "MODIFIED": "modified",
+        "ADDED": "missing_in_a",
+        "REMOVED": "missing_in_b",
+        "UNCHANGED": "matched",
+    }
+    formatted_clauses = []
+    for c in payload.get("changes", []):
+        formatted_clauses.append({
+            "topic": c.get("section") or c.get("clause_type") or "Clause",
+            "clause_type": c.get("clause_type", ""),
+            "status": status_map.get(c.get("change_type"), "modified"),
+            "change_type": c.get("change_type"),
+            "doc_a_text": c.get("old_text") or "",
+            "doc_b_text": c.get("new_text") or "",
+            "doc_a_citation": {
+                "page_number": c.get("page_old") or 1,
+                "section": c.get("section"),
+                "text": (c.get("old_text") or "")[:200],
+            } if c.get("old_text") else None,
+            "doc_b_citation": {
+                "page_number": c.get("page_new") or 1,
+                "section": c.get("section"),
+                "text": (c.get("new_text") or "")[:200],
+            } if c.get("new_text") else None,
+            "risk_note": c.get("explanation") or "",
+            "severity": c.get("severity", "LOW"),
+            "similarity": c.get("similarity", 1.0),
+            "term_changes": c.get("term_changes", []),
+        })
+
+    payload["clauses"] = formatted_clauses
+    payload["missing_in_a"] = [c.get("section") for c in payload.get("changes", []) if c.get("change_type") == "ADDED"]
+    payload["missing_in_b"] = [c.get("section") for c in payload.get("changes", []) if c.get("change_type") == "REMOVED"]
+
     payload.update({
         "audit_id_a": request.audit_id_a,
         "audit_id_b": request.audit_id_b,
@@ -122,6 +156,7 @@ async def compare_audits(
         "counts": result.counts,
         "risk_shift_score": result.risk_shift,
         "changes": payload["changes"],
+        "clauses": formatted_clauses,
         "created_at": datetime.utcnow(),
     })
     payload["comparison_id"] = comparison_id

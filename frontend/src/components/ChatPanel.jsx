@@ -31,7 +31,7 @@ const ChatPanel = ({ auditId, fileName, isOpen, onClose }) => {
     if (isOpen && messages.length === 0) {
       const initialGreeting = {
         role: 'assistant',
-        content: `Hello! 👋 I'm your Legal AI Assistant. I've indexed "${fileName || 'your document'}" using RAG (Retrieval-Augmented Generation).\n\nFeel free to ask me anything about termination windows, payment penalties, liability caps, or key obligations. Every answer I provide is strictly grounded with source citations!`,
+        content: `Hi! 😊 I'm your AI legal assistant. Ask me anything about "${fileName || 'your document'}" — clauses, obligations, risks, or anything else.`,
         sources: [],
         timestamp: new Date()
       };
@@ -155,7 +155,7 @@ const ChatPanel = ({ auditId, fileName, isOpen, onClose }) => {
                 </div>
                 <div>
                   <div className="flex items-center gap-1.5">
-                    <h3 className="font-extrabold text-sm text-white tracking-tight">Contract RAG AI Assistant</h3>
+                    <h3 className="font-extrabold text-sm text-white tracking-tight">AI Legal Assistant</h3>
                     <span className="bg-emerald-400/20 text-emerald-200 text-[9px] font-bold px-1.5 py-0.2 rounded border border-emerald-300/30">ONLINE</span>
                   </div>
                   <p className="text-[11px] text-blue-100/80 truncate max-w-[240px] flex items-center gap-1 mt-0.5">
@@ -194,7 +194,7 @@ const ChatPanel = ({ auditId, fileName, isOpen, onClose }) => {
                       {msg.role === 'assistant' ? (
                         <>
                           <Sparkles size={11} className="text-blue-500" />
-                          <span>Auditor RAG AI</span>
+                          <span>AI Assistant</span>
                         </>
                       ) : (
                         <>

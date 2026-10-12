@@ -722,6 +722,19 @@ def derive_key_points(summary_text: str, chunks: List[Chunk]) -> List[str]:
             points.append(re.sub(r"\s+", " ", sentence))
             if len(points) >= 3:
                 return points
+
+    # Fallback: if no strict duty/value sentences were extracted, take key sentences from summary_text
+    if not points and summary_text:
+        for sentence in re.split(r"(?<=[.;])\s+", summary_text):
+            sentence = sentence.strip()
+            if 30 <= len(sentence) <= 250:
+                key = sentence[:60].lower()
+                if key not in seen:
+                    seen.add(key)
+                    points.append(re.sub(r"\s+", " ", sentence))
+                    if len(points) >= 2:
+                        break
+
     return points
 
 

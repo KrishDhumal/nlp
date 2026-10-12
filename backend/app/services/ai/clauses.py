@@ -40,9 +40,12 @@ CLAUSE_SIGNATURES: List[ClauseSignature] = [
     ClauseSignature(
         "Confidentiality", "Obligations to keep information secret",
         strong=("confidential information", "strict confidence", "keep confidential",
-                "proprietary information"),
-        weak=("confidential", "disclose"),
-        heading_hints=("confidentiality", "confidential"),
+                "proprietary information", "conflict of interest",
+                "duty of confidentiality", "attorney-client privilege",
+                "privileged communication"),
+        weak=("confidential", "disclose", "privilege"),
+        heading_hints=("confidentiality", "confidential", "conflict of interest",
+                       "conflicts of interest", "attorney-client privilege"),
     ),
     ClauseSignature(
         "Non-Disclosure", "Restriction on disclosing information to third parties",
@@ -54,16 +57,30 @@ CLAUSE_SIGNATURES: List[ClauseSignature] = [
     ClauseSignature(
         "Termination", "How and when the agreement can be ended",
         strong=("terminate this agreement", "termination for convenience",
-                "right to terminate", "may terminate", "terminated upon"),
-        weak=("terminate", "termination"),
-        heading_hints=("termination", "term and termination"),
+                "right to terminate", "may terminate", "terminated upon",
+                "discharge of", "withdrawal of", "right to withdraw",
+                "withdraws from representation", "discharged at any time",
+                "termination of representation", "cease to represent",
+                "end of engagement", "conclude the representation"),
+        weak=("terminate", "termination", "discharge", "withdrawal", "withdraw"),
+        heading_hints=("termination", "term and termination", "discharge",
+                       "withdrawal", "discharge of attorney",
+                       "discharge of law firm", "termination of engagement"),
     ),
     ClauseSignature(
         "Payment", "Fees, invoicing and payment timing",
         strong=("shall pay", "payable within", "invoice", "payment terms",
-                "monthly retainer", "net thirty", "net 30"),
-        weak=("fee", "payment", "amount due"),
-        heading_hints=("payment", "fees", "compensation", "consideration"),
+                "monthly retainer", "net thirty", "net 30",
+                "initial deposit", "advance deposit", "retainer fee",
+                "hourly rate", "flat fee", "contingency fee",
+                "statements and payments", "billing statement",
+                "legal fees", "attorney fees", "costs and expenses"),
+        weak=("fee", "payment", "amount due", "deposit", "retainer",
+              "billing", "hourly", "charges"),
+        heading_hints=("payment", "fees", "compensation", "consideration",
+                       "fees and deposit", "statements and payments",
+                       "billing", "costs and fees", "attorney fees",
+                       "fee arrangement", "retainer"),
     ),
     ClauseSignature(
         "Intellectual Property", "Ownership of IP and deliverables",
@@ -343,19 +360,65 @@ def clause_types_present(clauses: Sequence[DetectedClause]) -> set:
     return {clause.clause_type for clause in clauses}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Document-type families: which clause expectations apply to which kinds of
+# document.  Non-commercial agreements (estate planning, attorney engagement)
+# should not be penalised for missing IP, Force Majeure, etc.
+# ─────────────────────────────────────────────────────────────────────────────
+_COMMERCIAL_EXPECTED = (
+    "Confidentiality", "Termination", "Payment", "Liability",
+    "Indemnification", "Governing Law", "Dispute Resolution",
+    "Intellectual Property", "Force Majeure", "Notice", "Assignment",
+)
+
+_LEGAL_SERVICES_EXPECTED = (
+    "Confidentiality", "Termination", "Payment",
+    "Governing Law", "Dispute Resolution", "Notice",
+)
+
+_ESTATE_PLANNING_EXPECTED = (
+    "Confidentiality", "Termination", "Payment",
+    "Governing Law", "Notice",
+)
+
+# Patterns that identify a document as belonging to a non-commercial family.
+_LEGAL_SERVICES_TYPES = {
+    "attorney engagement", "engagement letter", "legal services agreement",
+    "attorney retainer", "retainer agreement", "law firm engagement",
+    "legal representation", "attorney agreement", "legal agreement",
+}
+
+_ESTATE_PLANNING_TYPES = {
+    "estate planning", "will and testament", "trust agreement",
+    "power of attorney", "living trust", "estate plan",
+    "testamentary trust", "advance directive",
+}
+
+
+def _expected_clauses_for_document_type(document_type: str) -> tuple:
+    """Return the set of clause types one would *expect* for this document family."""
+    dt = (document_type or "").lower()
+    for pattern in _ESTATE_PLANNING_TYPES:
+        if pattern in dt:
+            return _ESTATE_PLANNING_EXPECTED
+    for pattern in _LEGAL_SERVICES_TYPES:
+        if pattern in dt:
+            return _LEGAL_SERVICES_EXPECTED
+    return _COMMERCIAL_EXPECTED
+
+
 def missing_clause_types(clauses: Sequence[DetectedClause],
-                         expected: Optional[Sequence[str]] = None) -> List[str]:
+                         expected: Optional[Sequence[str]] = None,
+                         document_type: str = "") -> List[str]:
     """
     Standard protections the document does not contain.
 
-    The default expectation is the set a commercial agreement would normally
-    carry; niche types (non-compete, audit rights) are excluded because their
-    absence is not by itself a gap.
+    When `document_type` is provided, the expected set is scoped to what that
+    kind of document would normally carry.  Estate planning and attorney
+    engagement letters, for example, are not penalised for missing IP, Force
+    Majeure, or commercial Indemnification.
     """
-    expected = expected or (
-        "Confidentiality", "Termination", "Payment", "Liability",
-        "Indemnification", "Governing Law", "Dispute Resolution",
-        "Intellectual Property", "Force Majeure", "Notice", "Assignment",
-    )
+    if expected is None:
+        expected = _expected_clauses_for_document_type(document_type)
     present = clause_types_present(clauses)
     return [name for name in expected if name not in present]

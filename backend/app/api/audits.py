@@ -16,7 +16,7 @@ JWT. A user id is never read from the request body.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import jwt
 from fastapi import (
@@ -108,8 +108,8 @@ def _to_response(audit: dict) -> dict:
         degraded=audit.get("degraded", False),
         degraded_reason=audit.get("degraded_reason", ""),
 
-        created_at=audit.get("created_at"),
-        updated_at=audit.get("updated_at"),
+        created_at=audit.get("created_at").replace(tzinfo=timezone.utc) if isinstance(audit.get("created_at"), datetime) and audit.get("created_at").tzinfo is None else audit.get("created_at"),
+        updated_at=audit.get("updated_at").replace(tzinfo=timezone.utc) if isinstance(audit.get("updated_at"), datetime) and audit.get("updated_at").tzinfo is None else audit.get("updated_at"),
     ).model_dump()
 
 
@@ -176,7 +176,7 @@ async def upload_and_audit(
 
     audit_id = str(uuid.uuid4())
     storage_key = storage_service.save(content, audit_id, extension="pdf")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     percent, label = STAGE_PROGRESS[ProcessingStatus.UPLOADED]
     await db["audits"].insert_one({

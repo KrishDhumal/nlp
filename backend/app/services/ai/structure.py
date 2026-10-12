@@ -173,6 +173,24 @@ def detect_sections(pages: List[Tuple[int, str]]) -> Tuple[List[Section], bool]:
     return sections, structure_detected
 
 
+def _extract_page_title(text: str, page_number: int) -> str:
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for line in lines[:6]:
+        if _NOISE.match(line):
+            continue
+        heading = match_heading(line)
+        if heading:
+            num, title = heading
+            return f"{num} {title}".strip() if num else title
+        clean = line.strip(" :.-–")
+        words = clean.split()
+        if 2 <= len(words) <= 10 and len(clean) <= 75:
+            if not _looks_like_prose(clean) and (clean.isupper() or clean.istitle()):
+                return clean.title() if clean.isupper() else clean
+
+    return f"Page {page_number}"
+
+
 def page_fallback_sections(pages: List[Tuple[int, str]]) -> List[Section]:
     """
     One section per page, for documents where no structure could be detected.
@@ -184,10 +202,11 @@ def page_fallback_sections(pages: List[Tuple[int, str]]) -> List[Section]:
     for page_number, text in pages:
         if not text.strip():
             continue
+        title = _extract_page_title(text, page_number)
         fallback.append(Section(
             section_id=f"page-{page_number}",
             section_number="",
-            section_title=f"Page {page_number}",
+            section_title=title,
             page_start=page_number,
             page_end=page_number,
             text=text.strip(),

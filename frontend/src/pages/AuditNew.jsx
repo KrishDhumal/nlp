@@ -1,4 +1,5 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   UploadCloud, FileText, AlertTriangle, ShieldAlert, Loader2, Lightbulb, Download, 
@@ -103,6 +104,24 @@ const AuditNew = () => {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [progress, setProgress] = useState({ percent: 0, label: '' });
   const fileInputRef = useRef(null);
+  const [searchParams] = useSearchParams();
+  const auditIdParam = searchParams.get('id');
+
+  useEffect(() => {
+    if (auditIdParam) {
+      setStage('loading');
+      setProgress({ percent: 100, label: 'Loading document audit...' });
+      api.get(`/api/audits/${auditIdParam}`)
+        .then((data) => {
+          setAuditResult(data);
+          setStage('analysis');
+        })
+        .catch((err) => {
+          setError(err.message || 'Failed to load document audit');
+          setStage('upload');
+        });
+    }
+  }, [auditIdParam]);
 
   const handleDragOver = (e) => {
     e.preventDefault();
@@ -318,7 +337,7 @@ const AuditNew = () => {
                     className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 bg-indigo-50 dark:bg-indigo-500/10 px-3 py-1.5 rounded-lg border border-indigo-100 dark:border-indigo-500/20 transition-colors"
                   >
                     <MessageSquare size={13} />
-                    Chat RAG
+                    Chat Assistant
                   </button>
                   <a
                     href={api.url(`/api/audits/file/${auditResult?.id}?token=${localStorage.getItem('token')}`)}
@@ -499,27 +518,69 @@ const AuditNew = () => {
 
                     {/* Section-by-Section Breakdown */}
                     {auditResult?.section_summaries?.length > 0 && (
-                      <div>
-                        <h4 className="text-[11px] font-extrabold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3">Section Breakdown</h4>
-                        <div className="space-y-3">
-                          {auditResult.section_summaries.map((sec, idx) => (
-                            <div key={idx} className="bg-slate-50/80 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 rounded-xl p-4">
-                              <div className="flex items-center justify-between mb-2">
-                                <h5 className="font-bold text-xs text-slate-800 dark:text-white flex items-center gap-1.5">
-                                  {sec.title}
-                                </h5>
-                                <SourceCitation citation={{ page_number: sec.page_number, section: sec.section, text: sec.text_snippet }} />
+                      <div className="mt-6 pt-6 border-t border-slate-200/60 dark:border-slate-800">
+                        <div className="flex items-center justify-between mb-4">
+                          <h4 className="text-xs font-extrabold text-slate-700 dark:text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                            <Layers size={14} className="text-primary-blue dark:text-blue-400" />
+                            Section Breakdown
+                            <span className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 lowercase normal-case bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">
+                              {auditResult.section_summaries.length} sections
+                            </span>
+                          </h4>
+                        </div>
+                        <div className="space-y-4">
+                          {auditResult.section_summaries.map((sec, idx) => {
+                            const title = sec.section_title || sec.title || (sec.section_number ? `Section ${sec.section_number}` : `Section ${idx + 1}`);
+                            const pageNum = sec.page_start || sec.page_number || (idx + 1);
+                            const summaryText = sec.summary || '';
+                            const keyPoints = sec.key_points || [];
+
+                            return (
+                              <div 
+                                key={idx} 
+                                className="bg-slate-50/90 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 rounded-xl p-4 shadow-2xs hover:border-blue-200 dark:hover:border-blue-900/50 transition-all"
+                              >
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+                                  <h5 className="font-bold text-sm text-slate-800 dark:text-white flex items-center gap-2">
+                                    <span className="w-5 h-5 rounded bg-blue-50 dark:bg-blue-900/30 text-primary-blue dark:text-blue-400 text-[10px] font-extrabold flex items-center justify-center shrink-0">
+                                      {idx + 1}
+                                    </span>
+                                    <span>{title}</span>
+                                  </h5>
+                                  <SourceCitation 
+                                    citation={{ 
+                                      page_number: pageNum, 
+                                      section: title, 
+                                      text: summaryText || (keyPoints[0] || '') 
+                                    }} 
+                                  />
+                                </div>
+
+                                {summaryText && (
+                                  <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed mb-3">
+                                    {summaryText}
+                                  </p>
+                                )}
+
+                                {keyPoints.length > 0 && (
+                                  <div className="mt-2.5 pt-2.5 border-t border-slate-200/60 dark:border-slate-800/80">
+                                    <div className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                                      <CheckCircle2 size={12} className="text-emerald-500" />
+                                      <span>Key Provisions</span>
+                                    </div>
+                                    <ul className="space-y-1.5">
+                                      {keyPoints.map((pt, pIdx) => (
+                                        <li key={pIdx} className="text-xs text-slate-600 dark:text-slate-400 flex items-start gap-2">
+                                          <span className="w-1.5 h-1.5 bg-blue-500 dark:bg-blue-400 rounded-full shrink-0 mt-1.5"></span>
+                                          <span className="leading-relaxed">{pt}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
                               </div>
-                              <ul className="space-y-1.5 pl-2">
-                                {(sec.key_points || []).map((pt, pIdx) => (
-                                  <li key={pIdx} className="text-[11px] text-slate-600 dark:text-slate-400 flex items-center gap-1.5">
-                                    <span className="w-1.5 h-1.5 bg-blue-500 rounded-full shrink-0"></span>
-                                    <span>{pt}</span>
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     )}

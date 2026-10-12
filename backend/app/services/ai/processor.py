@@ -222,10 +222,15 @@ _CLAUSE_SIGNATURES = {
     "Termination": (
         "terminat", "expiration", "renewal", "non-renewal", "notice of termination",
         "cure period", "material breach", "for convenience", "suspend services",
+        "discharge of", "withdrawal of", "right to withdraw", "cease to represent",
+        "end of engagement", "termination of representation",
     ),
     "Payment": (
         "payment", "invoice", "fee", "retainer", "compensation", "late charge",
         "interest at", "net thirty", "net 30", "reimburse", "price", "usd", "$",
+        "deposit", "hourly rate", "flat fee", "contingency fee",
+        "billing statement", "statements and payments", "legal fees",
+        "attorney fees", "costs and expenses",
     ),
     "Liability": (
         "liability", "liable", "damages", "consequential", "indirect",
@@ -237,6 +242,8 @@ _CLAUSE_SIGNATURES = {
     "Confidentiality": (
         "confidential", "non-disclosure", "nondisclosure", "trade secret",
         "proprietary information", "personal data", "privacy",
+        "conflict of interest", "attorney-client privilege",
+        "duty of confidentiality", "privileged communication",
     ),
     "Governing Law": (
         "governing law", "governed by", "jurisdiction", "venue", "arbitration",

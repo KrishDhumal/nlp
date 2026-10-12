@@ -155,7 +155,11 @@ class DocumentPipeline:
             # ── Legal analysis: deterministic first, LLM as enrichment ───
             await self._set_status(db, audit_id, ProcessingStatus.ANALYZING)
             detected_clauses = detect_clauses(document.chunks)
-            risk = analyse_risk(document.chunks, detected_clauses)
+            risk = analyse_risk(
+                document.chunks,
+                detected_clauses,
+                document_type=summary.document_type or "",
+            )
             # The LLM pass is enrichment only. The deterministic analysis above
             # is already complete, so a rate-limited or slow API must never hold
             # the document in "analyzing" — it is bounded and then abandoned.
@@ -312,8 +316,16 @@ class DocumentPipeline:
             "document_type": summary.document_type,
             "executive_summary": summary.executive_summary,
             "summary": summary.executive_summary,  # alias for dashboard/library
-            "document_overview": summary.document_overview,
-            "section_summaries": [s.model_dump(mode="json") for s in summary.section_summaries],
+            "section_summaries": [
+                {
+                    **s.model_dump(mode="json"),
+                    "title": s.section_title,
+                    "page_number": s.page_start,
+                    "section": s.section_title,
+                    "text_snippet": s.summary[:200] if s.summary else "",
+                }
+                for s in summary.section_summaries
+            ],
             "key_takeaways": [item.summary for item in summary.important_clauses[:6]],
 
             # Entities, in the shape the existing frontend grid expects

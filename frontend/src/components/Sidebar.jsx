@@ -11,7 +11,6 @@ const Sidebar = () => {
     { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
     { name: 'New Summary', path: '/audit', icon: FileSearch },
     { name: 'Compare', path: '/compare', icon: GitCompareArrows },
-    { name: 'Compliance', path: '/compliance', icon: Shield },
     { name: 'Library', path: '/library', icon: Library },
     { name: 'Settings', path: '/settings', icon: Settings },
   ];

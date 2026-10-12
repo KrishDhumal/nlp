@@ -27,8 +27,8 @@ const FloatingChatWidget = ({ activeAuditId, activeFileName }) => {
                 <Bot size={18} className="text-blue-600 dark:text-blue-400" />
               </div>
               <div className="text-xs text-slate-700 dark:text-slate-200">
-                <p className="font-bold text-slate-900 dark:text-white">👋 Contract RAG AI Assistant</p>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">Click to ask any question about your document!</p>
+                <p className="font-bold text-slate-900 dark:text-white">👋 Hey there!</p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">Got questions about your contract? Ask away.</p>
               </div>
               <button
                 onClick={(e) => {

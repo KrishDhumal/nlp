@@ -38,7 +38,8 @@ SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 # Two sections are the same section above this similarity.
 _ALIGN_THRESHOLD = 0.45
 # Aligned text above this is treated as unchanged (formatting noise only).
-_UNCHANGED_THRESHOLD = 0.985
+# Set conservatively so even minor clause wording changes surface as MODIFIED.
+_UNCHANGED_THRESHOLD = 0.97
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,16 +250,107 @@ def _numbers(pattern: re.Pattern, text: str) -> List[str]:
     return [m.group(1) for m in pattern.finditer(text or "")]
 
 
+# Context-word patterns to attach semantic labels to extracted numeric values.
+# Each entry: (label, value_suffix, context_regex)
+_CONTEXT_LABELS: List[Tuple[str, str, re.Pattern]] = [
+    ("Payment Terms",    "Days",  re.compile(r"payment\s+terms?[^.]{0,80}?\b(\d{1,4})\s*\)?\s*days?",  re.I)),
+    ("Notice Period",    "Days",  re.compile(r"notice[^.]{0,80}?\b(\d{1,4})\s*\)?\s*days?",           re.I)),
+    ("Retention Period", "Years", re.compile(r"retention[^.]{0,80}?\b(\d{1,3})\s*\)?\s*years?",        re.I)),
+    ("Data Retention",  "Years",  re.compile(r"data[^.]{0,80}?\b(\d{1,3})\s*\)?\s*years?",            re.I)),
+    ("Storage Fee",     "",       re.compile(r"storage[^.]{0,80}?(?:[$₹£€]|\bUSD|\bINR)\s?([\d,]+(?:\.\d{1,2})?)", re.I)),
+    ("Liability Cap",   "",       re.compile(r"liability[^.]{0,80}?(?:[$₹£€]|\bUSD|\bINR)\s?([\d,]+(?:\.\d{1,2})?)", re.I)),
+]
+
+
+def _extract_context_value(pattern: re.Pattern, text: str) -> Optional[str]:
+    """Return the first captured group from a context-aware pattern, or None."""
+    m = pattern.search(text or "")
+    return m.group(1) if m else None
+
+
+def _format_monetary(raw: str) -> str:
+    """Format a raw numeric string as a currency value."""
+    try:
+        val = float(raw.replace(",", ""))
+        if val == 0:
+            return "Waived / $0"
+        return f"${val:,.0f}" if val == int(val) else f"${val:,.2f}"
+    except ValueError:
+        return raw
+
+
 def _detect_term_changes(old: str, new: str) -> List[dict]:
     """
     Commercial values that changed between two versions of the same clause.
 
-    Reported as old → new so the UI can render "30 days → 60 days" rather than a
+    Reported as old → new so the UI can render "30 Days → 60 Days" rather than a
     wall of highlighted text.
+
+    Pass 1: context-aware patterns that attach semantic field names (Payment Terms,
+    Retention Period, Storage Fee …) so each change gets a clean label instead of a
+    generic "Notice period" with a comma-separated bag of all numbers found.
+
+    Pass 2: fall back to the generic TERM_PATTERNS for anything not caught above.
     """
     changes: List[dict] = []
+    handled_term_names: set = set()
 
+    # ── Pass 1: context-labelled extraction ──────────────────────────────────
+    for label, suffix, ctx_pattern in _CONTEXT_LABELS:
+        old_raw = _extract_context_value(ctx_pattern, old)
+        new_raw = _extract_context_value(ctx_pattern, new)
+        if old_raw is None and new_raw is None:
+            continue
+
+        def _fmt(raw: Optional[str]) -> Optional[str]:
+            if raw is None:
+                return None
+            if "Fee" in label or "Cap" in label:
+                return _format_monetary(raw)
+            return f"{raw} {suffix}".strip()
+
+        old_display = _fmt(old_raw)
+        new_display = _fmt(new_raw)
+
+        if old_display == new_display:
+            continue
+
+        def as_float(v: Optional[str]) -> Optional[float]:
+            try:
+                return float((v or "").replace(",", "").replace("$", "").split()[0])
+            except (ValueError, IndexError):
+                return None
+
+        old_f = as_float(old_raw)
+        new_f = as_float(new_raw)
+        direction = ""
+        if old_f is not None and new_f is not None:
+            direction = "increased" if new_f > old_f else ("decreased" if new_f < old_f else "")
+        elif new_raw is None:
+            direction = "removed"
+        else:
+            direction = "added"
+
+        changes.append({
+            "term": label,
+            "old": old_display,
+            "new": new_display,
+            "direction": direction,
+            "severity": "HIGH",
+        })
+        # Track which generic pattern names to skip so we don't double-report.
+        if "Days" in suffix or "Period" in label or "Notice" in label:
+            handled_term_names.add("Notice period")
+        if "Years" in suffix or "Retention" in label:
+            handled_term_names.add("Duration in years")
+        if "Fee" in label or "Cap" in label:
+            handled_term_names.add("Monetary amount")
+
+    # ── Pass 2: generic TERM_PATTERNS fallback ───────────────────────────────
     for term in TERM_PATTERNS:
+        if term.name in handled_term_names:
+            continue
+
         old_values = _numbers(term.pattern, old)
         new_values = _numbers(term.pattern, new)
         if not old_values and not new_values:
@@ -266,29 +358,33 @@ def _detect_term_changes(old: str, new: str) -> List[dict]:
         if old_values == new_values:
             continue
 
+        # Take only the *first* value per side so we never produce "15, 15, 30".
+        old_first_raw = old_values[0] if old_values else None
+        new_first_raw = new_values[0] if new_values else None
+
         def as_float(value: str) -> Optional[float]:
             try:
                 return float(value.replace(",", ""))
             except ValueError:
                 return None
 
-        old_first = as_float(old_values[0]) if old_values else None
-        new_first = as_float(new_values[0]) if new_values else None
+        old_f2 = as_float(old_first_raw) if old_first_raw else None
+        new_f2 = as_float(new_first_raw) if new_first_raw else None
 
         direction = ""
         severity = term.severity
-        if old_first is not None and new_first is not None and old_first != new_first:
-            worse = (new_first > old_first) == term.increase_is_worse
-            direction = "increased" if new_first > old_first else "decreased"
-            if worse and abs(new_first - old_first) / max(old_first, 1) >= 0.5:
+        if old_f2 is not None and new_f2 is not None and old_f2 != new_f2:
+            worse = (new_f2 > old_f2) == term.increase_is_worse
+            direction = "increased" if new_f2 > old_f2 else "decreased"
+            if worse and abs(new_f2 - old_f2) / max(old_f2, 1) >= 0.5:
                 severity = "CRITICAL" if term.severity == "HIGH" else "HIGH"
         elif not old_values or not new_values:
             direction = "added" if new_values else "removed"
 
         changes.append({
             "term": term.name,
-            "old": ", ".join(old_values[:3]) or None,
-            "new": ", ".join(new_values[:3]) or None,
+            "old": old_first_raw,
+            "new": new_first_raw,
             "direction": direction,
             "severity": severity,
         })
@@ -487,15 +583,17 @@ class CompareService:
 
     @staticmethod
     def _shift_label(shift: int) -> str:
+        # Negative shift = new version is MORE client-friendly (risk decreased).
+        # Positive shift = new version is riskier (risk increased).
         if shift <= -30:
-            return f"{abs(shift)}% higher risk in the new version"
+            return f"Risk Decreased ({abs(shift)}% lower risk / more client-friendly)"
         if shift < 0:
-            return f"Slightly higher risk in the new version ({abs(shift)}%)"
+            return f"Risk Decreased ({abs(shift)}% lower risk / more client-friendly)"
         if shift == 0:
             return "No material change in risk"
         if shift < 30:
-            return f"Slightly lower risk in the new version ({shift}%)"
-        return f"{shift}% lower risk in the new version"
+            return f"Risk Increased ({shift}% higher risk / less client-friendly)"
+        return f"Risk Increased Significantly ({shift}% higher risk)"
 
     @staticmethod
     def _summarise(result: ComparisonResult, a_name: str, b_name: str) -> str:
