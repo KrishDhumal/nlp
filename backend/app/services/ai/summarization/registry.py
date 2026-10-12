@@ -53,6 +53,31 @@ def get_provider(name: Optional[str] = None) -> SummarizationProvider:
     return _cache[key]
 
 
+def get_provider_for_language(language: str) -> SummarizationProvider:
+    """
+    The provider for a document in `language`.
+
+    Hindi routes to its own checkpoint so the summary stays in the document's
+    language; everything else uses the configured default. If no Hindi model is
+    configured, the English provider is returned and the grounding guard will
+    reject its Hindi output, leaving the extractive fallback — which is still in
+    Hindi, because it quotes the document.
+    """
+    if (language or "en").lower().startswith("hi") and settings.HINDI_SUMMARIZATION_MODEL:
+        key = f"local:{settings.HINDI_SUMMARIZATION_MODEL}"
+        if key not in _cache:
+            from app.services.ai.summarization.local_provider import (
+                LocalTransformerSummarizer,
+            )
+
+            _cache[key] = LocalTransformerSummarizer(
+                model_name=settings.HINDI_SUMMARIZATION_MODEL
+            )
+            logger.info(f"[Summarization] Hindi provider -> {_cache[key].model_name}")
+        return _cache[key]
+    return get_provider()
+
+
 def reset_providers() -> None:
     """Drop cached providers. Used by tests to swap engines."""
     _cache.clear()

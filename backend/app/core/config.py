@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     SUMMARIZATION_USE_INSTRUCTION: bool = (
         os.getenv("SUMMARIZATION_USE_INSTRUCTION", "false").lower() == "true"
     )
+    # Hindi summarisation. Selected automatically when the document is detected
+    # as Devanagari; English documents are untouched. Set to an empty string to
+    # disable Hindi summarisation and fall back to extractive output, which is
+    # still grounded and still in the document's own language.
+    HINDI_SUMMARIZATION_MODEL: str = os.getenv(
+        "HINDI_SUMMARIZATION_MODEL", "ai4bharat/MultiIndicSentenceSummarization"
+    )
     # "auto" resolves to cuda, then mps (Apple Silicon), then cpu.
     SUMMARIZATION_DEVICE: str = os.getenv("SUMMARIZATION_DEVICE", "auto")
     SUMMARIZATION_MAX_INPUT_TOKENS: int = int(os.getenv("SUMMARIZATION_MAX_INPUT_TOKENS", "4096"))

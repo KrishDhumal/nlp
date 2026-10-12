@@ -30,6 +30,7 @@ from app.core.config import settings
 from app.core.logging import logger
 from app.domain.document import CanonicalDocument, Page, ProcessingStatus
 from app.services.ai.chunking import TokenAwareChunker
+from app.services.ai.language import detect_language
 from app.services.ai.structure import detect_sections, page_fallback_sections
 from app.services.ai.text_cleaning import clean_pages
 
@@ -182,6 +183,12 @@ class DocumentProcessor:
         raw_pages = self.extract_pages(file_path)
         cleaned = clean_pages(raw_pages)
         document.pages = [Page(page_number=num, text=text) for num, text in cleaned]
+
+        # Language detection sits here: after extraction and cleaning, before any
+        # language-specific model is chosen.
+        detected = detect_language(document.full_text)
+        document.language = detected.language
+        document.language_confidence = detected.confidence
 
         if not document.has_usable_text(settings.MIN_TEXT_CHARS):
             document.status = ProcessingStatus.OCR_REQUIRED

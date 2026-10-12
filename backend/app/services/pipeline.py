@@ -133,6 +133,8 @@ class DocumentPipeline:
                     "chunk_count": len(document.chunks),
                     "token_count": document.total_tokens,
                     "structure_detected": document.structure_detected,
+            "language": document.language,
+            "language_confidence": document.language_confidence,
                 },
             )
 

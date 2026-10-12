@@ -109,6 +109,7 @@ class SummaryResult(BaseModel):
 
     # Provenance — which engine produced this, so a stored summary stays
     # attributable after the model is changed.
+    language: str = "en"
     provider: str = ""
     model_name: str = ""
     model_version: str = ""

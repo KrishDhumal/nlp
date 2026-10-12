@@ -97,6 +97,8 @@ def _to_response(audit: dict) -> dict:
         token_count=audit.get("token_count", 0),
         file_size=audit.get("file_size", 0),
         structure_detected=audit.get("structure_detected", False),
+        language=audit.get("language", "en"),
+        language_confidence=audit.get("language_confidence", 0.0),
         vector_backend=audit.get("vector_backend", "local"),
 
         summary_provider=audit.get("summary_provider", ""),

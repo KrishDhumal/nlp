@@ -158,6 +158,8 @@ class AuditResponse(BaseModel):
     token_count: int = 0
     file_size: int = 0
     structure_detected: bool = False
+    language: str = "en"
+    language_confidence: float = 0.0
     vector_backend: str = "local"
 
     # Provenance — which engine and pipeline produced this result.

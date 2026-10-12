@@ -160,6 +160,11 @@ class CanonicalDocument(BaseModel):
     # much the section-level summaries can be trusted.
     structure_detected: bool = False
 
+    # Detected after extraction, before summarisation. Only the summarisation
+    # model depends on it; every other stage is language-agnostic.
+    language: str = "en"
+    language_confidence: float = 0.0
+
     status: ProcessingStatus = ProcessingStatus.UPLOADED
     created_at: datetime = Field(default_factory=datetime.utcnow)
 

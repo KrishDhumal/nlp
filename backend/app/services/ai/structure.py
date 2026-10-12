@@ -26,7 +26,8 @@ _KEYWORD_HEADING = re.compile(
 
 # 1. Definitions / 5.4 Termination for Convenience
 _NUMBERED_HEADING = re.compile(
-    r"^\s*(?P<ref>\d{1,2}(?:\.\d{1,2}){0,3})[.)]?\s+(?P<title>[A-Z][^\n]{2,90})\s*$"
+    r"^\s*(?P<ref>\d{1,2}(?:\.\d{1,2}){0,3})[.)]?\s+"
+    r"(?P<title>[A-Z\u0900-\u097F][^\n]{2,90})\s*$"
 )
 
 # TERMINATION AND RENEWAL — an all-caps title on its own line
@@ -66,9 +67,11 @@ def _looks_like_prose(text: str) -> bool:
     """
     if "," in text or ";" in text:
         return True
-    if text.endswith("."):
+    if text.endswith((".", "\u0964", "\u0965")):
         return True
-    if _OPERATIVE_VERB.search(text):
+    # The verb list is English; applying it to Devanagari would be meaningless,
+    # and the other signals (punctuation, length) still apply.
+    if not re.search(r"[\u0900-\u097F]", text) and _OPERATIVE_VERB.search(text):
         return True
     if text.isupper() and len(text.split()) > 6:
         return True

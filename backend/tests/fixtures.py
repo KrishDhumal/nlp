@@ -6,6 +6,8 @@ section numbers, page numbers and clause values are visible right here, next to
 the assertions that depend on them.
 """
 
+import os
+
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
@@ -125,6 +127,70 @@ def write_sample_contract(path: str) -> str:
         if head:
             style = styles["Title"] if head.isupper() and len(head) < 40 else heading
             flow.append(Paragraph(head, style))
+        if text:
+            flow.append(Paragraph(text, body))
+        flow.append(Spacer(1, 4))
+
+    SimpleDocTemplate(path, pagesize=LETTER).build(flow)
+    return path
+
+
+# ── Hindi fixture ────────────────────────────────────────────────────────────
+# A short service agreement in Hindi, used to prove the pipeline stays in the
+# document's own language rather than translating through English.
+SAMPLE_HINDI_CONTRACT = [
+    ("सेवा अनुबंध", None),
+    (None,
+     "यह सेवा अनुबंध दिनांक 1 अक्टूबर 2026 को मेसर्स आकाश टेक्नोलॉजीज प्राइवेट लिमिटेड "
+     "(\"सेवा प्रदाता\") और मेसर्स भारत लॉजिस्टिक्स लिमिटेड (\"ग्राहक\") के बीच किया गया है।"),
+    ("1. सेवाओं का दायरा",
+     "1.1 सेवा प्रदाता ग्राहक को सॉफ्टवेयर परामर्श सेवाएं प्रदान करेगा। "
+     "1.2 ग्राहक को किसी भी वितरण को अस्वीकार करने के लिए दस (10) कार्य दिवस का समय होगा।"),
+    ("2. भुगतान की शर्तें",
+     "2.1 ग्राहक सेवा प्रदाता को प्रति माह रुपये 5,00,000 का भुगतान करेगा। "
+     "2.2 सभी चालान प्राप्ति के तीस (30) दिनों के भीतर देय होंगे। "
+     "2.3 विलंबित भुगतान पर प्रति माह 1.5% ब्याज लगेगा।"),
+    ("3. गोपनीयता",
+     "3.1 प्रत्येक पक्ष दूसरे पक्ष की गोपनीय जानकारी को पूर्ण गोपनीयता में रखेगा। "
+     "3.2 यह दायित्व अनुबंध समाप्ति के बाद तीन (3) वर्षों तक लागू रहेगा।"),
+    ("4. समाप्ति",
+     "4.1 कोई भी पक्ष साठ (60) दिनों की पूर्व लिखित सूचना देकर इस अनुबंध को समाप्त कर सकता है। "
+     "4.2 किसी भी भौतिक उल्लंघन की स्थिति में अनुबंध तत्काल समाप्त किया जा सकता है।"),
+    ("5. लागू कानून",
+     "5.1 यह अनुबंध भारत के कानूनों द्वारा शासित होगा। "
+     "5.2 कोई भी विवाद मुंबई के न्यायालयों के अधिकार क्षेत्र में होगा।"),
+]
+
+
+def write_hindi_contract(path: str) -> str:
+    """Render the Hindi sample to `path`. Needs a Devanagari-capable font."""
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    font_name = "Helvetica"
+    for candidate in (
+        "/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc",
+        "/Library/Fonts/Kohinoor.ttc",
+        "/System/Library/Fonts/Kohinoor.ttc",
+    ):
+        if os.path.exists(candidate):
+            try:
+                pdfmetrics.registerFont(TTFont("Devanagari", candidate, subfontIndex=0))
+                font_name = "Devanagari"
+                break
+            except Exception:
+                continue
+
+    styles = getSampleStyleSheet()
+    heading = ParagraphStyle("hi_h", parent=styles["Heading2"],
+                             fontName=font_name, spaceAfter=6)
+    body = ParagraphStyle("hi_b", parent=styles["BodyText"], fontName=font_name,
+                          spaceAfter=8, leading=16)
+
+    flow = []
+    for head, text in SAMPLE_HINDI_CONTRACT:
+        if head:
+            flow.append(Paragraph(head, heading))
         if text:
             flow.append(Paragraph(text, body))
         flow.append(Spacer(1, 4))

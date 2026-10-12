@@ -40,7 +40,7 @@ from app.services.ai.summarization.base import (
     GROUP_INSTRUCTION,
     SummarizationProvider,
 )
-from app.services.ai.summarization.registry import get_provider
+from app.services.ai.summarization.registry import get_provider, get_provider_for_language
 
 ProgressHook = Optional[Callable[[int, str], None]]
 
@@ -78,13 +78,18 @@ class SummarizationService:
         contract that was successfully parsed and indexed should still be usable.
         """
         started = time.time()
-        provider = self.provider
+        # An explicitly injected provider wins (tests, overrides); otherwise the
+        # provider is chosen by the document's detected language.
+        provider = self._provider or get_provider_for_language(
+            getattr(document, "language", "en")
+        )
 
         result = SummaryResult(
             document_id=document.document_id,
             provider=provider.name,
             pipeline_version=settings.PIPELINE_VERSION,
             prompt_version=settings.PROMPT_VERSION,
+            language=getattr(document, "language", "en"),
         )
 
         chunks = document.chunks
@@ -469,11 +474,16 @@ MIN_GROUNDING_RATIO = float(os.getenv("SUMMARY_MIN_GROUNDING", "0.6"))
 
 
 def content_words(text: str) -> set:
-    """Lowercased content words of `text`, stopwords and short tokens removed."""
-    import re
+    """
+    Content words of `text`, in either Latin or Devanagari script.
 
-    words = re.findall(r"[a-z][a-z'\-]{2,}", (text or "").lower())
-    return {w for w in words if w not in _STOPWORDS}
+    Delegates to the language module so Hindi is handled: an ASCII-only pattern
+    finds no words in a Hindi summary, scores its grounding as zero, and causes
+    every legitimate Hindi summary to be rejected as ungrounded.
+    """
+    from app.services.ai.language import content_words as _words
+
+    return _words(text, _STOPWORDS)
 
 
 def grounding_ratio(summary: str, source: str) -> float:
@@ -667,7 +677,9 @@ def extractive_summary(text: str, max_sentences: int = 3) -> str:
     if not text or not text.strip():
         return ""
 
-    sentences = [s.strip() for s in re.split(r"(?<=[.;])\s+", text) if len(s.strip()) > 30]
+    from app.services.ai.language import split_sentences
+
+    sentences = [s for s in split_sentences(text) if len(s) > 30]
     if not sentences:
         return text.strip()[:300]
 
