@@ -49,3 +49,5 @@ yarn-error.log*
 .tox/
 coverage.xml
 htmlcov/
+# Windows venv committed by mistake in the team repo
+backend/.venv/
