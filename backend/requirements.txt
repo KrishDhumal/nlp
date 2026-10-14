@@ -24,3 +24,4 @@ google-auth
 pdfplumber
 torch  # local summarisation runtime
 transformers  # local summarisation models (LED)
+sentencepiece  # IndicBART/Hindi tokenizer (spiece.model)

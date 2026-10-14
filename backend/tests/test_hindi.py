@@ -148,6 +148,23 @@ def test_routing():
     check("no translation step is configured anywhere",
           "translate" not in settings.HINDI_SUMMARIZATION_MODEL.lower())
 
+    # A Hindi document must never fall back to an English checkpoint: the output
+    # would be in the wrong language, which is worse than no abstractive summary.
+    check("Hindi has no cross-language fallback chain",
+          hindi._candidate_models() == [settings.HINDI_SUMMARIZATION_MODEL],
+          str(hindi._candidate_models()))
+    check("English keeps its own fallback chain",
+          len(english._candidate_models()) > 1, str(english._candidate_models()))
+
+    # IndicBART ships only a sentencepiece `spiece.model`; AutoTokenizer in
+    # transformers 5.x cannot convert it, which silently disabled Hindi
+    # entirely. The loader must fall back to the sentencepiece tokenizer.
+    import importlib.util
+
+    check("the sentencepiece library is installed",
+          importlib.util.find_spec("sentencepiece") is not None,
+          "required by the IndicBART tokenizer")
+
 
 def main_():
     print("=" * 74)

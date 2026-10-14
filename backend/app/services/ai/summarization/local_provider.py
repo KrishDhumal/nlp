@@ -247,7 +247,7 @@ class LocalTransformerSummarizer(SummarizationProvider):
                     f"on {self._device} (first use only)..."
                 )
 
-                self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+                self._tokenizer = self._load_tokenizer(model_name)
                 model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
                 model.eval()
                 # Deliberately left on CPU here. This runs on the loader thread,
@@ -377,6 +377,39 @@ class LocalTransformerSummarizer(SummarizationProvider):
             pass
         self._on_device = True
         return True
+
+    @staticmethod
+    def _load_tokenizer(model_name: str):
+        """
+        Load a tokenizer, falling back for sentencepiece-only checkpoints.
+
+        IndicBART-family models (ai4bharat/*) ship only `spiece.model`, and
+        AutoTokenizer in transformers 5.x fails to convert it with
+        "Error parsing line b'\x0e'". Their model card specifies AlbertTokenizer
+        with the fast converter disabled, so try that before giving up.
+        """
+        from transformers import AutoTokenizer
+
+        try:
+            return AutoTokenizer.from_pretrained(model_name)
+        except Exception as auto_error:
+            logger.info(
+                f"[LocalSummarizer] AutoTokenizer failed for '{model_name}' "
+                f"({str(auto_error)[:80]}); trying the sentencepiece loader."
+            )
+
+        try:
+            return AutoTokenizer.from_pretrained(
+                model_name, use_fast=False, keep_accents=True, do_lower_case=False
+            )
+        except Exception:
+            pass
+
+        from transformers import AlbertTokenizer
+
+        return AlbertTokenizer.from_pretrained(
+            model_name, use_fast=False, keep_accents=True, do_lower_case=False
+        )
 
     def _is_led(self) -> bool:
         return "led" in (self._model_name or "").lower()

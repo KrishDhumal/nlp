@@ -70,9 +70,16 @@ def get_provider_for_language(language: str) -> SummarizationProvider:
                 LocalTransformerSummarizer,
             )
 
-            _cache[key] = LocalTransformerSummarizer(
+            provider = LocalTransformerSummarizer(
                 model_name=settings.HINDI_SUMMARIZATION_MODEL
             )
+            # No cross-language fallback chain. If the Hindi model cannot load,
+            # falling back to an English checkpoint would summarise a Hindi
+            # contract into English — worse than no abstractive summary. The
+            # extractive fallback is used instead, and it stays in Hindi because
+            # it quotes the document.
+            provider._candidate_models = lambda: [settings.HINDI_SUMMARIZATION_MODEL]
+            _cache[key] = provider
             logger.info(f"[Summarization] Hindi provider -> {_cache[key].model_name}")
         return _cache[key]
     return get_provider()
